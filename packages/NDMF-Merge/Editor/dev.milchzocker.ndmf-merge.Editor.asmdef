@@ -1,0 +1,24 @@
+{
+  "name": "dev.milchzocker.ndmf-merge.Editor",
+  "rootNamespace": "NDMFMerge.Editor",
+  "references": [
+    "dev.milchzocker.ndmf-merge.Runtime",
+    "nadena.dev.ndmf"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [
+    {
+      "name": "dev.hai-vr.chillaxins",
+      "expression": "1.0.0",
+      "define": "CHILLAXINS_INSTALLED"
+    }
+  ],
+  "noEngineReferences": false
+}
