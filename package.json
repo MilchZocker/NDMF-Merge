@@ -1,0 +1,19 @@
+{
+  "name": "dev.milchzocker.ndmf-merge",
+  "displayName": "NDMF Merge",
+  "version": "1.0.0",
+  "unity": "2021.3",
+  "description": "NDMF-based armature merging for ChilloutVR - Modular Avatar without Modular Avatar",
+  "author": {
+    "name": "MilchZocker",
+    "url": "https://github.com/MilchZocker"
+  },
+  "dependencies": {
+    "nadena.dev.ndmf": "1.5.0"
+  },
+  "vpmDependencies": {
+    "dev.hai-vr.chillaxins": "1.1.0"
+  },
+  "url": "https://github.com/MilchZocker/NDMF-Merge",
+  "licensesUrl": "https://github.com/MilchZocker/NDMF-Merge/blob/main/LICENSE.md"
+}
