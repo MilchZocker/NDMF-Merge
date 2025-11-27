@@ -18,8 +18,29 @@ namespace NDMFMerge.Runtime
     }
     
     [Serializable]
+    public class OutfitToMerge
+    {
+        [Tooltip("The outfit/armature GameObject to merge")]
+        public GameObject outfit;
+        
+        [Tooltip("Prefix to remove from bone names when matching")]
+        public string prefix = "";
+        
+        [Tooltip("Suffix to remove from bone names when matching")]
+        public string suffix = "";
+        
+        [Tooltip("Prefix to add to unique bones (bones that don't exist in avatar)")]
+        public string uniqueBonePrefix = "";
+        
+        [Tooltip("Prefix to add to all mesh GameObjects")]
+        public string meshPrefix = "";
+    }
+    
+    [Serializable]
     public class BoneConflictEntry
     {
+        [HideInInspector]
+        public string outfitName;
         public Transform sourceBone;
         public Transform targetBone;
         public BoneConflictResolution resolution = BoneConflictResolution.StillMerge;
@@ -43,34 +64,9 @@ namespace NDMFMerge.Runtime
     [DisallowMultipleComponent]
     public class CVRMergeArmature : MonoBehaviour
     {
-        [Header("Merge Mode")]
-        [Tooltip("Armature Merge: Merge bone hierarchies | Model Merge: Attach model to specific bone")]
-        public MergeMode mergeMode = MergeMode.ArmatureMerge;
-        
-        [Header("Target Settings")]
-        [Tooltip("Target GameObject with CVR Avatar component (leave empty to auto-detect)")]
-        public GameObject targetCVRAvatarObject;
-        
-        [Header("Model Merge Settings")]
-        [Tooltip("Bone to attach this model to (for Model Merge mode)")]
-        public Transform targetBone;
-        
-        [Tooltip("Use current transform offset from target bone")]
-        public bool useCurrentOffset = true;
-        
-        [Tooltip("Manual offset position (used when useCurrentOffset is false)")]
-        public Vector3 positionOffset = Vector3.zero;
-        
-        [Tooltip("Manual offset rotation (used when useCurrentOffset is false)")]
-        public Vector3 rotationOffset = Vector3.zero;
-        
-        [Space(10)]
-        [Header("Armature Merge Settings")]
-        [Tooltip("Prefix to remove from bone names when matching (e.g., 'Outfit_')")]
-        public string prefix = "";
-        
-        [Tooltip("Suffix to remove from bone names when matching (e.g., '_Outfit')")]
-        public string suffix = "";
+        [Header("Outfits to Merge")]
+        [Tooltip("List of outfits/armatures to merge into this avatar")]
+        public List<OutfitToMerge> outfitsToMerge = new List<OutfitToMerge>();
         
         [Header("Bone Conflict Resolution")]
         [Tooltip("Default resolution for new conflicts")]
@@ -120,24 +116,19 @@ namespace NDMFMerge.Runtime
         [Tooltip("Merge animator controller into target avatar")]
         public bool mergeAnimator = true;
         
-        [Tooltip("Animator to merge (auto-detected from CVRAvatar or Animator component)")]
-        public RuntimeAnimatorController animatorToMerge;
-        
         [Header("Broken Animator References")]
         [Tooltip("Detected broken animator references")]
         public List<BrokenAnimatorReference> brokenReferences = new List<BrokenAnimatorReference>();
         
         /// <summary>
-        /// Gets the CVRAvatar component from the target GameObject
+        /// Gets the CVRAvatar component from this GameObject
         /// </summary>
-        public Component GetTargetCVRAvatar()
+        public Component GetCVRAvatar()
         {
-            if (targetCVRAvatarObject == null) return null;
-            
             var cvrAvatarType = FindCVRAvatarType();
             if (cvrAvatarType == null) return null;
             
-            return targetCVRAvatarObject.GetComponent(cvrAvatarType);
+            return GetComponent(cvrAvatarType);
         }
         
         private System.Type FindCVRAvatarType()
@@ -152,19 +143,11 @@ namespace NDMFMerge.Runtime
         
         private void OnValidate()
         {
-            if (mergeMode == MergeMode.ModelMerge && targetBone == null)
+            // Validate this has CVRAvatar component
+            var cvrAvatar = GetCVRAvatar();
+            if (cvrAvatar == null)
             {
-                Debug.LogWarning($"[CVR Merge Armature] Model Merge mode requires a Target Bone!", this);
-            }
-            
-            // Validate targetCVRAvatarObject has CVRAvatar component
-            if (targetCVRAvatarObject != null)
-            {
-                var cvrAvatar = GetTargetCVRAvatar();
-                if (cvrAvatar == null)
-                {
-                    Debug.LogWarning($"[CVR Merge Armature] Target GameObject does not have a CVRAvatar component!", this);
-                }
+                Debug.LogWarning($"[CVR Merge Armature] This GameObject must have a CVRAvatar component!", this);
             }
         }
         
