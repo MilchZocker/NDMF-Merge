@@ -2,22 +2,56 @@ using UnityEngine;
 using UnityEditor;
 using NDMFMerge.Runtime;
 using System.Collections.Generic;
+using UnityEditorInternal;
 
 namespace NDMFMerge.Editor
 {
     [CustomEditor(typeof(CVRMergeArmature))]
     public class CVRMergeArmatureEditor : UnityEditor.Editor
     {
-        private SerializedProperty mergeModeProperty;
-        private bool showAdvancedSettings = false;
+        private ReorderableList outfitsList;
         private bool showBoneConflicts = false;
-        private bool showBrokenReferences = false;
+        private bool showAdvancedSettings = false;
         private Vector2 conflictScrollPos;
-        private Vector2 brokenRefScrollPos;
         
         private void OnEnable()
         {
-            mergeModeProperty = serializedObject.FindProperty("mergeMode");
+            outfitsList = new ReorderableList(serializedObject, serializedObject.FindProperty("outfitsToMerge"), true, true, true, true);
+            
+            outfitsList.drawHeaderCallback = (Rect rect) => {
+                EditorGUI.LabelField(rect, "Outfits to Merge");
+            };
+            
+            outfitsList.drawElementCallback = (Rect rect, int index, bool isActive, bool isFocused) => {
+                var element = outfitsList.serializedProperty.GetArrayElementAtIndex(index);
+                rect.y += 2;
+                
+                float lineHeight = EditorGUIUtility.singleLineHeight;
+                float spacing = 2;
+                
+                EditorGUI.PropertyField(new Rect(rect.x, rect.y, rect.width, lineHeight), 
+                    element.FindPropertyRelative("outfit"), GUIContent.none);
+                
+                rect.y += lineHeight + spacing;
+                EditorGUI.PropertyField(new Rect(rect.x, rect.y, rect.width, lineHeight), 
+                    element.FindPropertyRelative("prefix"));
+                
+                rect.y += lineHeight + spacing;
+                EditorGUI.PropertyField(new Rect(rect.x, rect.y, rect.width, lineHeight), 
+                    element.FindPropertyRelative("suffix"));
+                
+                rect.y += lineHeight + spacing;
+                EditorGUI.PropertyField(new Rect(rect.x, rect.y, rect.width, lineHeight), 
+                    element.FindPropertyRelative("uniqueBonePrefix"));
+                
+                rect.y += lineHeight + spacing;
+                EditorGUI.PropertyField(new Rect(rect.x, rect.y, rect.width, lineHeight), 
+                    element.FindPropertyRelative("meshPrefix"));
+            };
+            
+            outfitsList.elementHeightCallback = (int index) => {
+                return (EditorGUIUtility.singleLineHeight + 2) * 5 + 4;
+            };
         }
         
         public override void OnInspectorGUI()
@@ -26,67 +60,40 @@ namespace NDMFMerge.Editor
             serializedObject.Update();
             
             EditorGUILayout.HelpBox(
-                "Non-destructive armature and model merging for ChilloutVR avatars. " +
-                "Processing occurs automatically during avatar upload.",
+                "Add this component to your avatar (with CVRAvatar component). " +
+                "Add outfits to the list below and they will be merged during NDMF processing.",
                 MessageType.Info);
             
             EditorGUILayout.Space();
             
-            EditorGUILayout.PropertyField(mergeModeProperty);
-            
-            EditorGUILayout.Space();
-            
-            EditorGUILayout.LabelField("Target Settings", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("targetCVRAvatarObject"), 
-                new GUIContent("Target Avatar Object", "GameObject with CVRAvatar component (leave empty to auto-detect)"));
-            
-            if (merger.targetCVRAvatarObject != null)
+            // Validate CVRAvatar
+            var cvrAvatar = merger.GetCVRAvatar();
+            if (cvrAvatar == null)
             {
-                var cvrAvatar = merger.GetTargetCVRAvatar();
-                if (cvrAvatar != null)
-                {
-                    EditorGUILayout.HelpBox($"✓ CVRAvatar found on: {cvrAvatar.gameObject.name}", MessageType.Info);
-                    
-                    var armature = FindArmatureFromCVRAvatar(cvrAvatar);
-                    if (armature != null)
-                    {
-                        EditorGUILayout.HelpBox($"✓ Detected Armature: {armature.name}", MessageType.Info);
-                    }
-                    else
-                    {
-                        EditorGUILayout.HelpBox("⚠ Could not detect armature in CVRAvatar!", MessageType.Warning);
-                    }
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox("✗ No CVRAvatar component found on this GameObject!", MessageType.Error);
-                }
-            }
-            
-            EditorGUILayout.Space();
-            
-            if (merger.mergeMode == MergeMode.ArmatureMerge)
-            {
-                DrawArmatureMergeSettings(merger);
+                EditorGUILayout.HelpBox(
+                    "✗ This GameObject must have a CVRAvatar component!",
+                    MessageType.Error);
             }
             else
             {
-                DrawModelMergeSettings(merger);
+                EditorGUILayout.HelpBox(
+                    "✓ CVRAvatar found",
+                    MessageType.None);
             }
             
             EditorGUILayout.Space();
             
-            if (merger.mergeMode == MergeMode.ArmatureMerge)
-            {
-                DrawBoneConflictsSection(merger);
-            }
+            // Outfits list
+            outfitsList.DoLayoutList();
             
             EditorGUILayout.Space();
             
-            DrawBrokenReferencesSection(merger);
+            // Bone Conflicts
+            DrawBoneConflictsSection(merger);
             
             EditorGUILayout.Space();
             
+            // Advanced Settings
             showAdvancedSettings = EditorGUILayout.Foldout(showAdvancedSettings, "Advanced Settings", true);
             if (showAdvancedSettings)
             {
@@ -98,47 +105,8 @@ namespace NDMFMerge.Editor
             EditorGUILayout.Space();
             
             DrawPreviewInfo(merger);
-            DrawValidationWarnings(merger);
             
             serializedObject.ApplyModifiedProperties();
-        }
-        
-        private void DrawArmatureMergeSettings(CVRMergeArmature merger)
-        {
-            EditorGUILayout.LabelField("Armature Merge Settings", EditorStyles.boldLabel);
-            
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("prefix"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("suffix"));
-            
-            EditorGUILayout.Space(5);
-            EditorGUILayout.LabelField("Exclusions", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("excludedTransforms"), true);
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("excludedNamePatterns"), true);
-        }
-        
-        private void DrawModelMergeSettings(CVRMergeArmature merger)
-        {
-            EditorGUILayout.LabelField("Model Merge Settings", EditorStyles.boldLabel);
-            
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("targetBone"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("useCurrentOffset"));
-            
-            if (!merger.useCurrentOffset)
-            {
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("positionOffset"));
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("rotationOffset"));
-            }
-            else if (merger.targetBone != null)
-            {
-                var posDiff = merger.transform.position - merger.targetBone.position;
-                var rotDiff = (merger.transform.rotation * Quaternion.Inverse(merger.targetBone.rotation)).eulerAngles;
-                
-                EditorGUILayout.HelpBox(
-                    $"Current offset from {merger.targetBone.name}:\n" +
-                    $"Position: {posDiff}\n" +
-                    $"Rotation: {rotDiff}",
-                    MessageType.None);
-            }
         }
         
         private void DrawBoneConflictsSection(CVRMergeArmature merger)
@@ -151,7 +119,7 @@ namespace NDMFMerge.Editor
             EditorGUILayout.Space(5);
             
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Detect Conflicts", GUILayout.Height(30)))
+            if (GUILayout.Button("Detect Conflicts in All Outfits", GUILayout.Height(30)))
             {
                 DetectBoneConflicts(merger);
             }
@@ -166,14 +134,14 @@ namespace NDMFMerge.Editor
             {
                 EditorGUILayout.Space(5);
                 EditorGUILayout.HelpBox(
-                    $"Found {merger.boneConflicts.Count} bone conflicts. Choose resolution for each:",
+                    $"Found {merger.boneConflicts.Count} bone conflicts across all outfits. Choose resolution for each:",
                     MessageType.Warning);
                 
                 showBoneConflicts = EditorGUILayout.Foldout(showBoneConflicts, $"Conflicts ({merger.boneConflicts.Count})", true);
                 
                 if (showBoneConflicts)
                 {
-                    conflictScrollPos = EditorGUILayout.BeginScrollView(conflictScrollPos, GUILayout.MaxHeight(300));
+                    conflictScrollPos = EditorGUILayout.BeginScrollView(conflictScrollPos, GUILayout.MaxHeight(400));
                     
                     for (int i = 0; i < merger.boneConflicts.Count; i++)
                     {
@@ -181,7 +149,7 @@ namespace NDMFMerge.Editor
                         
                         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
                         
-                        EditorGUILayout.LabelField($"Bone: {conflict.sourceBone.name}", EditorStyles.boldLabel);
+                        EditorGUILayout.LabelField($"[{conflict.outfitName}] Bone: {conflict.sourceBone.name}", EditorStyles.boldLabel);
                         
                         EditorGUI.indentLevel++;
                         EditorGUILayout.LabelField($"Position Δ: {conflict.positionDifference.magnitude:F4}m");
@@ -189,8 +157,7 @@ namespace NDMFMerge.Editor
                         EditorGUILayout.LabelField($"Scale Δ: {conflict.scaleDifference.magnitude:F4}");
                         EditorGUI.indentLevel--;
                         
-                        conflict.resolution = (BoneConflictResolution)EditorGUILayout.EnumPopup(
-                            "Resolution", conflict.resolution);
+                        conflict.resolution = (BoneConflictResolution)EditorGUILayout.EnumPopup("Resolution", conflict.resolution);
                         
                         EditorGUILayout.EndVertical();
                         EditorGUILayout.Space(2);
@@ -223,89 +190,13 @@ namespace NDMFMerge.Editor
             }
         }
         
-        private void DrawBrokenReferencesSection(CVRMergeArmature merger)
-        {
-            EditorGUILayout.LabelField("Animator Reference Checker", EditorStyles.boldLabel);
-            
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Check Animator References", GUILayout.Height(30)))
-            {
-                CheckBrokenAnimatorReferences(merger);
-            }
-            if (merger.brokenReferences.Count > 0)
-            {
-                if (GUILayout.Button("Auto-Fix All", GUILayout.Width(100), GUILayout.Height(30)))
-                {
-                    AutoFixAllReferences(merger);
-                }
-                if (GUILayout.Button("Clear", GUILayout.Width(60), GUILayout.Height(30)))
-                {
-                    merger.brokenReferences.Clear();
-                    EditorUtility.SetDirty(merger);
-                }
-            }
-            EditorGUILayout.EndHorizontal();
-            
-            if (merger.brokenReferences.Count > 0)
-            {
-                EditorGUILayout.Space(5);
-                EditorGUILayout.HelpBox(
-                    $"Found {merger.brokenReferences.Count} broken animator references.",
-                    MessageType.Warning);
-                
-                showBrokenReferences = EditorGUILayout.Foldout(showBrokenReferences, 
-                    $"Broken References ({merger.brokenReferences.Count})", true);
-                
-                if (showBrokenReferences)
-                {
-                    brokenRefScrollPos = EditorGUILayout.BeginScrollView(brokenRefScrollPos, GUILayout.MaxHeight(300));
-                    
-                    for (int i = 0; i < merger.brokenReferences.Count; i++)
-                    {
-                        var brokenRef = merger.brokenReferences[i];
-                        
-                        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                        
-                        EditorGUILayout.LabelField($"Broken Path: {brokenRef.originalPath}", EditorStyles.boldLabel);
-                        
-                        EditorGUI.indentLevel++;
-                        EditorGUILayout.LabelField($"Property: {brokenRef.fieldName}");
-                        
-                        if (!string.IsNullOrEmpty(brokenRef.suggestedPath))
-                        {
-                            EditorGUILayout.LabelField($"Suggested: {brokenRef.suggestedPath}", 
-                                new GUIStyle(EditorStyles.label) { normal = { textColor = Color.green } });
-                            
-                            EditorGUILayout.BeginHorizontal();
-                            
-                            brokenRef.suggestedPath = EditorGUILayout.TextField("New Path:", brokenRef.suggestedPath);
-                            
-                            if (GUILayout.Button("Fix", GUILayout.Width(50)))
-                            {
-                                FixAnimatorReference(merger, brokenRef);
-                            }
-                            
-                            EditorGUILayout.EndHorizontal();
-                        }
-                        else
-                        {
-                            EditorGUILayout.LabelField("No suggestion found", 
-                                new GUIStyle(EditorStyles.label) { normal = { textColor = Color.red } });
-                        }
-                        
-                        EditorGUI.indentLevel--;
-                        
-                        EditorGUILayout.EndVertical();
-                        EditorGUILayout.Space(2);
-                    }
-                    
-                    EditorGUILayout.EndScrollView();
-                }
-            }
-        }
-        
         private void DrawAdvancedSettings(CVRMergeArmature merger)
         {
+            EditorGUILayout.LabelField("Exclusions", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("excludedTransforms"), true);
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("excludedNamePatterns"), true);
+            
+            EditorGUILayout.Space(5);
             EditorGUILayout.LabelField("Component Merging", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(serializedObject.FindProperty("lockParentScale"));
             EditorGUILayout.PropertyField(serializedObject.FindProperty("mergeDynamicBones"));
@@ -329,28 +220,24 @@ namespace NDMFMerge.Editor
             EditorGUILayout.Space(5);
             EditorGUILayout.LabelField("Animator Merging", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(serializedObject.FindProperty("mergeAnimator"));
-            
-            if (merger.mergeAnimator)
-            {
-                EditorGUI.indentLevel++;
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("animatorToMerge"), 
-                    new GUIContent("Animator Override", "Leave empty to auto-detect from CVRAvatar or Animator component"));
-                EditorGUI.indentLevel--;
-            }
         }
         
         private void DrawPreviewInfo(CVRMergeArmature merger)
         {
             EditorGUILayout.LabelField("Preview", EditorStyles.boldLabel);
             
-            var smrs = merger.GetComponentsInChildren<SkinnedMeshRenderer>(true);
-            var meshRenderers = merger.GetComponentsInChildren<MeshRenderer>(true);
+            int totalOutfits = 0;
+            int totalMeshes = 0;
+            int totalBones = 0;
             
-            EditorGUILayout.LabelField($"SkinnedMeshRenderers: {smrs.Length}");
-            EditorGUILayout.LabelField($"MeshRenderers: {meshRenderers.Length}");
-            
-            if (merger.mergeMode == MergeMode.ArmatureMerge)
+            foreach (var outfit in merger.outfitsToMerge)
             {
+                if (outfit.outfit == null) continue;
+                
+                totalOutfits++;
+                var smrs = outfit.outfit.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+                totalMeshes += smrs.Length;
+                
                 var bones = new HashSet<Transform>();
                 foreach (var smr in smrs)
                 {
@@ -362,89 +249,111 @@ namespace NDMFMerge.Editor
                         }
                     }
                 }
-                EditorGUILayout.LabelField($"Unique bones: {bones.Count}");
-                EditorGUILayout.LabelField($"Excluded transforms: {merger.excludedTransforms.Count}");
-            }
-        }
-        
-        private void DrawValidationWarnings(CVRMergeArmature merger)
-        {
-            if (merger.mergeMode == MergeMode.ModelMerge && merger.targetBone == null)
-            {
-                EditorGUILayout.HelpBox(
-                    "Model Merge mode requires a Target Bone to be set!",
-                    MessageType.Error);
+                totalBones += bones.Count;
             }
             
-            if (merger.targetCVRAvatarObject != null)
-            {
-                var cvrAvatar = merger.GetTargetCVRAvatar();
-                if (cvrAvatar == null)
-                {
-                    EditorGUILayout.HelpBox(
-                        "Target GameObject does not have a CVRAvatar component!",
-                        MessageType.Error);
-                }
-            }
-            
-            if (merger.mergeMode == MergeMode.ArmatureMerge)
-            {
-                var smrs = merger.GetComponentsInChildren<SkinnedMeshRenderer>(true);
-                if (smrs.Length == 0)
-                {
-                    EditorGUILayout.HelpBox(
-                        "No SkinnedMeshRenderers found. Consider using Model Merge mode instead.",
-                        MessageType.Warning);
-                }
-            }
+            EditorGUILayout.LabelField($"Outfits: {totalOutfits}");
+            EditorGUILayout.LabelField($"Total SkinnedMeshRenderers: {totalMeshes}");
+            EditorGUILayout.LabelField($"Total unique bones: {totalBones}");
         }
-        
-        #region Bone Conflict Detection
         
         private void DetectBoneConflicts(CVRMergeArmature merger)
         {
             merger.boneConflicts.Clear();
             
-            Component targetCVRAvatar = merger.GetTargetCVRAvatar();
-            if (targetCVRAvatar == null)
+            var cvrAvatar = merger.GetCVRAvatar();
+            if (cvrAvatar == null)
             {
-                targetCVRAvatar = FindCVRAvatarInScene();
-            }
-            
-            if (targetCVRAvatar == null)
-            {
-                EditorUtility.DisplayDialog("Error", "Could not find target CVRAvatar. Please set a GameObject with CVRAvatar component.", "OK");
+                EditorUtility.DisplayDialog("Error", "No CVRAvatar component found on this GameObject.", "OK");
                 return;
             }
             
-            Transform targetArmature = FindArmatureFromCVRAvatar(targetCVRAvatar);
+            Transform targetArmature = FindArmatureFromCVRAvatar(cvrAvatar);
             if (targetArmature == null)
             {
-                EditorUtility.DisplayDialog("Error", "Could not find armature in target CVRAvatar.", "OK");
+                EditorUtility.DisplayDialog("Error", "Could not find armature in CVRAvatar.", "OK");
                 return;
             }
             
-            DetectConflictsRecursive(merger, merger.transform, targetArmature);
+            foreach (var outfitEntry in merger.outfitsToMerge)
+            {
+                if (outfitEntry.outfit == null) continue;
+                
+                // Get bones used by meshes in this outfit
+                var usedBones = GetBonesUsedByMeshes(outfitEntry.outfit.transform);
+                Debug.Log($"[Conflict Detection] Found {usedBones.Count} used bones in {outfitEntry.outfit.name}");
+                
+                DetectConflictsRecursive(merger, outfitEntry, outfitEntry.outfit.transform, targetArmature, usedBones);
+            }
             
             EditorUtility.SetDirty(merger);
             
             if (merger.boneConflicts.Count == 0)
             {
-                EditorUtility.DisplayDialog("Success", "No bone conflicts detected!", "OK");
+                EditorUtility.DisplayDialog("Success", "No bone conflicts detected in used bones!", "OK");
+            }
+            else
+            {
+                Debug.LogWarning($"Found {merger.boneConflicts.Count} conflicts in used bones");
             }
         }
         
-        private void DetectConflictsRecursive(CVRMergeArmature merger, Transform source, Transform target)
+        private HashSet<Transform> GetBonesUsedByMeshes(Transform root)
         {
-            if (merger.IsExcluded(source))
+            var usedBones = new HashSet<Transform>();
+            var skinnedMeshes = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            
+            foreach (var smr in skinnedMeshes)
+            {
+                if (smr.bones != null)
+                {
+                    foreach (var bone in smr.bones)
+                    {
+                        if (bone != null)
+                        {
+                            usedBones.Add(bone);
+                            
+                            // Add all parents up to root
+                            Transform current = bone.parent;
+                            while (current != null && current != root)
+                            {
+                                usedBones.Add(current);
+                                current = current.parent;
+                            }
+                        }
+                    }
+                }
+                
+                if (smr.rootBone != null)
+                {
+                    usedBones.Add(smr.rootBone);
+                }
+            }
+            
+            return usedBones;
+        }
+        
+        private void DetectConflictsRecursive(CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform source, Transform target, HashSet<Transform> usedBones)
+        {
+            if (merger.IsExcluded(source)) return;
+            
+            // Skip if this bone is not used by any mesh
+            if (!usedBones.Contains(source))
+            {
+                // Still check children
+                foreach (Transform child in source)
+                {
+                    DetectConflictsRecursive(merger, outfitEntry, child, target, usedBones);
+                }
                 return;
+            }
             
             string boneName = source.name;
             
-            if (!string.IsNullOrEmpty(merger.prefix) && boneName.StartsWith(merger.prefix))
-                boneName = boneName.Substring(merger.prefix.Length);
-            if (!string.IsNullOrEmpty(merger.suffix) && boneName.EndsWith(merger.suffix))
-                boneName = boneName.Substring(0, boneName.Length - merger.suffix.Length);
+            if (!string.IsNullOrEmpty(outfitEntry.prefix) && boneName.StartsWith(outfitEntry.prefix))
+                boneName = boneName.Substring(outfitEntry.prefix.Length);
+            if (!string.IsNullOrEmpty(outfitEntry.suffix) && boneName.EndsWith(outfitEntry.suffix))
+                boneName = boneName.Substring(0, boneName.Length - outfitEntry.suffix.Length);
             
             Transform targetBone = FindBoneByName(target, boneName);
             
@@ -462,6 +371,7 @@ namespace NDMFMerge.Editor
                 {
                     merger.boneConflicts.Add(new BoneConflictEntry
                     {
+                        outfitName = outfitEntry.outfit.name,
                         sourceBone = source,
                         targetBone = targetBone,
                         resolution = merger.defaultBoneConflictResolution,
@@ -474,167 +384,8 @@ namespace NDMFMerge.Editor
             
             foreach (Transform child in source)
             {
-                DetectConflictsRecursive(merger, child, target);
+                DetectConflictsRecursive(merger, outfitEntry, child, target, usedBones);
             }
-        }
-        
-        #endregion
-        
-        #region Broken Reference Detection
-        
-        private void CheckBrokenAnimatorReferences(CVRMergeArmature merger)
-        {
-            merger.brokenReferences.Clear();
-            
-            var animator = merger.GetComponent<Animator>();
-            if (animator == null || animator.runtimeAnimatorController == null)
-            {
-                EditorUtility.DisplayDialog("Info", "No Animator found on this object.", "OK");
-                return;
-            }
-            
-            var controller = animator.runtimeAnimatorController as UnityEditor.Animations.AnimatorController;
-            if (controller == null)
-            {
-                EditorUtility.DisplayDialog("Error", "Animator controller is not an AnimatorController.", "OK");
-                return;
-            }
-            
-            CheckAnimatorController(controller, merger);
-            
-            EditorUtility.SetDirty(merger);
-            
-            if (merger.brokenReferences.Count == 0)
-            {
-                EditorUtility.DisplayDialog("Success", "No broken references found!", "OK");
-            }
-            else
-            {
-                Debug.LogWarning($"Found {merger.brokenReferences.Count} broken animator references");
-            }
-        }
-        
-        private void CheckAnimatorController(UnityEditor.Animations.AnimatorController controller, CVRMergeArmature merger)
-        {
-            foreach (var layer in controller.layers)
-            {
-                CheckStateMachine(layer.stateMachine, merger);
-            }
-        }
-        
-        private void CheckStateMachine(UnityEditor.Animations.AnimatorStateMachine stateMachine, CVRMergeArmature merger)
-        {
-            foreach (var state in stateMachine.states)
-            {
-                if (state.state.motion is AnimationClip clip)
-                {
-                    CheckAnimationClip(clip, merger);
-                }
-                else if (state.state.motion is UnityEditor.Animations.BlendTree blendTree)
-                {
-                    CheckBlendTree(blendTree, merger);
-                }
-            }
-            
-            foreach (var subMachine in stateMachine.stateMachines)
-            {
-                CheckStateMachine(subMachine.stateMachine, merger);
-            }
-        }
-        
-        private void CheckBlendTree(UnityEditor.Animations.BlendTree blendTree, CVRMergeArmature merger)
-        {
-            foreach (var child in blendTree.children)
-            {
-                if (child.motion is AnimationClip clip)
-                {
-                    CheckAnimationClip(clip, merger);
-                }
-                else if (child.motion is UnityEditor.Animations.BlendTree subTree)
-                {
-                    CheckBlendTree(subTree, merger);
-                }
-            }
-        }
-        
-        private void CheckAnimationClip(AnimationClip clip, CVRMergeArmature merger)
-        {
-            if (clip == null) return;
-            
-            var bindings = AnimationUtility.GetCurveBindings(clip);
-            foreach (var binding in bindings)
-            {
-                var transform = merger.transform.Find(binding.path);
-                if (transform == null && !string.IsNullOrEmpty(binding.path))
-                {
-                    var pathParts = binding.path.Split('/');
-                    var targetName = pathParts[pathParts.Length - 1];
-                    
-                    var found = FindTransformByName(merger.transform, targetName);
-                    
-                    merger.brokenReferences.Add(new BrokenAnimatorReference
-                    {
-                        originalPath = binding.path,
-                        suggestedPath = found != null ? GetRelativePath(merger.transform, found) : "",
-                        componentReference = clip,
-                        fieldName = binding.propertyName,
-                        autoFixed = false
-                    });
-                }
-            }
-        }
-        
-        private void AutoFixAllReferences(CVRMergeArmature merger)
-        {
-            foreach (var brokenRef in merger.brokenReferences)
-            {
-                if (!string.IsNullOrEmpty(brokenRef.suggestedPath))
-                {
-                    FixAnimatorReference(merger, brokenRef);
-                }
-            }
-            
-            EditorUtility.DisplayDialog("Success", "Auto-fixed all references with suggestions!", "OK");
-        }
-        
-        private void FixAnimatorReference(CVRMergeArmature merger, BrokenAnimatorReference brokenRef)
-        {
-            if (brokenRef.componentReference is AnimationClip clip)
-            {
-                var bindings = AnimationUtility.GetCurveBindings(clip);
-                foreach (var binding in bindings)
-                {
-                    if (binding.path == brokenRef.originalPath && binding.propertyName == brokenRef.fieldName)
-                    {
-                        var curve = AnimationUtility.GetEditorCurve(clip, binding);
-                        AnimationUtility.SetEditorCurve(clip, binding, null);
-                        
-                        var newBinding = binding;
-                        var pathField = typeof(EditorCurveBinding).GetField("m_Path", 
-                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        pathField?.SetValue(newBinding, brokenRef.suggestedPath);
-                        
-                        AnimationUtility.SetEditorCurve(clip, newBinding, curve);
-                        
-                        brokenRef.autoFixed = true;
-                        EditorUtility.SetDirty(clip);
-                        Debug.Log($"Fixed reference: {brokenRef.originalPath} -> {brokenRef.suggestedPath}");
-                    }
-                }
-            }
-        }
-        
-        #endregion
-        
-        #region Helper Methods
-        
-        private Component FindCVRAvatarInScene()
-        {
-            var cvrAvatarType = System.Type.GetType("ABI.CCK.Components.CVRAvatar, Assembly-CSharp");
-            if (cvrAvatarType == null) return null;
-            
-            var allAvatars = FindObjectsOfType(cvrAvatarType);
-            return allAvatars.Length > 0 ? allAvatars[0] as Component : null;
         }
         
         private Transform FindArmatureFromCVRAvatar(Component cvrAvatar)
@@ -681,34 +432,5 @@ namespace NDMFMerge.Editor
             
             return null;
         }
-        
-        private Transform FindTransformByName(Transform root, string name)
-        {
-            if (root.name == name) return root;
-            
-            foreach (Transform child in root)
-            {
-                var found = FindTransformByName(child, name);
-                if (found != null) return found;
-            }
-            
-            return null;
-        }
-        
-        private string GetRelativePath(Transform root, Transform target)
-        {
-            var path = new List<string>();
-            var current = target;
-            
-            while (current != root && current != null)
-            {
-                path.Insert(0, current.name);
-                current = current.parent;
-            }
-            
-            return string.Join("/", path);
-        }
-        
-        #endregion
     }
 }
