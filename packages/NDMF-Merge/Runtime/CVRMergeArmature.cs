@@ -111,6 +111,9 @@ namespace NDMFMerge.Runtime
         [Tooltip("Merge CVR Advanced Avatar Settings (toggles, sliders, etc.)")]
         public bool mergeAdvancedAvatarSetup = false;
 
+        [Tooltip("After all merges, run CVR's 'Create Controller' to generate the AAS animator from merged entries. Default ON.")]
+        public bool generateAASControllerAtEnd = true;
+
         [Tooltip("Prefix for merged advanced settings entries (e.g., 'Outfit_')")]
         public string advancedSettingsPrefix = "";
 

@@ -10,6 +10,9 @@ using UnityEditor.Animations;
 using nadena.dev.ndmf;
 using NDMFMerge.Runtime;
 
+// direct Magica API (no reflection)
+using MagicaCloth;
+
 [assembly: ExportsPlugin(typeof(NDMFMerge.Editor.CVRMergeArmaturePlugin))]
 
 namespace NDMFMerge.Editor
@@ -19,10 +22,13 @@ namespace NDMFMerge.Editor
         public override string QualifiedName => "dev.milchzocker.ndmf-merge";
         public override string DisplayName => "NDMF Merge";
 
+        private const string NDMF_PREFIX = "[NDMF]";
+
         private StringBuilder mergeLog = new StringBuilder();
 
         protected override void Configure()
         {
+            // -------------- RESOLVING (armature/components/AAS merge) --------------
             InPhase(BuildPhase.Resolving)
                 .Run("Merge Armatures", ctx =>
                 {
@@ -51,6 +57,7 @@ namespace NDMFMerge.Editor
                     Debug.Log(mergeLog.ToString());
                 });
 
+            // -------------- TRANSFORMING (animator merge) --------------
             InPhase(BuildPhase.Transforming)
                 .Run("Merge Animators", ctx =>
                 {
@@ -67,6 +74,38 @@ namespace NDMFMerge.Editor
                         {
                             Debug.LogError($"[NDMF Merge] Failed to merge animators: {ex.Message}\n{ex.StackTrace}", merger);
                         }
+                    }
+                });
+
+            // -------------- TRANSFORMING (AAS controller gen AFTER merge) --------------
+            InPhase(BuildPhase.Transforming)
+                .Run("Generate AAS Controller At End", ctx =>
+                {
+                    var mergeComponents = ctx.AvatarRootTransform.GetComponentsInChildren<CVRMergeArmature>(true);
+                    foreach (var merger in mergeComponents)
+                    {
+                        if (merger == null) continue;
+                        if (!merger.generateAASControllerAtEnd) continue;
+                        if (!merger.mergeAdvancedAvatarSetup) continue;
+
+                        var cvrAvatar = merger.GetCVRAvatar();
+                        if (cvrAvatar == null) continue;
+
+                        try
+                        {
+                            GenerateAASControllerAtEnd(cvrAvatar);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"[NDMF Merge] AAS controller generation failed: {ex.Message}\n{ex.StackTrace}", merger);
+                        }
+                    }
+
+                    // cleanup: NOW remove merger components from baked output
+                    foreach (var merger in mergeComponents)
+                    {
+                        if (merger != null)
+                            UnityEngine.Object.DestroyImmediate(merger);
                     }
                 });
         }
@@ -151,13 +190,380 @@ namespace NDMFMerge.Editor
                 }
             }
 
+            // Destroy cloned outfits
             foreach (var outfitRoot in clonedOutfits)
             {
                 if (outfitRoot != null)
                     UnityEngine.Object.DestroyImmediate(outfitRoot.gameObject);
             }
 
-            UnityEngine.Object.DestroyImmediate(merger);
+            // === POST-MERGE FINALIZATION STEPS (RESOLVING) ===
+            try
+            {
+                // Rebuild Magica data here (still fine in Resolving)
+                RebuildMagicaData(ctx.AvatarRootTransform);
+
+                mergeLog.AppendLine("Post-merge finalization complete (Magica rebuild).");
+            }
+            catch (Exception ex)
+            {
+                mergeLog.AppendLine($"  ERROR in post-merge finalization: {ex.Message}");
+                Debug.LogError($"[NDMF Merge] Post-merge finalization failed: {ex.Message}\n{ex.StackTrace}");
+            }
+
+            // IMPORTANT: do NOT destroy merger here anymore.
+            // We need it in Transforming to decide about AAS controller generation.
+        }
+
+        // ------------------------------------------------------------
+        // POST-MERGE: Magica data rebuild (DIRECT API, ORDERED)
+        // ------------------------------------------------------------
+        private void RebuildMagicaData(Transform avatarRoot)
+        {
+            // 1) Render deformers first
+            var renderDeformers = avatarRoot.GetComponentsInChildren<MagicaRenderDeformer>(true).ToList();
+            mergeLog.AppendLine($"Rebuilding MagicaRenderDeformer data: {renderDeformers.Count}");
+            foreach (var rd in renderDeformers)
+            {
+                if (rd == null) continue;
+                BuildManager.CreateComponent(rd);
+                EditorUtility.SetDirty(rd);
+            }
+
+            // 2) Virtual deformers second
+            var virtualDeformers = avatarRoot.GetComponentsInChildren<MagicaVirtualDeformer>(true).ToList();
+            mergeLog.AppendLine($"Rebuilding MagicaVirtualDeformer data: {virtualDeformers.Count}");
+            foreach (var vd in virtualDeformers)
+            {
+                if (vd == null) continue;
+                BuildManager.CreateComponent(vd);
+                EditorUtility.SetDirty(vd);
+            }
+
+            // 3) Bone cloth third
+            var boneCloths = avatarRoot.GetComponentsInChildren<MagicaBoneCloth>(true).ToList();
+            mergeLog.AppendLine($"Rebuilding MagicaBoneCloth data: {boneCloths.Count}");
+            foreach (var bc in boneCloths)
+            {
+                if (bc == null) continue;
+                BuildManager.CreateComponent(bc);
+                EditorUtility.SetDirty(bc);
+            }
+
+            // 4) Mesh cloth last
+            var meshCloths = avatarRoot.GetComponentsInChildren<MagicaMeshCloth>(true).ToList();
+            mergeLog.AppendLine($"Rebuilding MagicaMeshCloth data: {meshCloths.Count}");
+            foreach (var mc in meshCloths)
+            {
+                if (mc == null) continue;
+                BuildManager.CreateComponent(mc);
+                EditorUtility.SetDirty(mc);
+            }
+        }
+
+        // ------------------------------------------------------------
+        // POST-MERGE: AAS controller generation (runs AFTER MergeAnimators)
+        // Uses AAS Base/Override from Advanced Settings tab
+        // Creates an Override Controller and assigns it to CVRAvatar Animation Overrides
+        // DOES NOT TOUCH Unity Animator
+        // ------------------------------------------------------------
+        private void GenerateAASControllerAtEnd(Component targetCVRAvatar)
+        {
+            if (targetCVRAvatar == null) return;
+
+            var advSettings = GetAdvancedAvatarSettings(targetCVRAvatar);
+            if (advSettings == null)
+            {
+                mergeLog.AppendLine("AAS controller gen: No avatarSettings found on target.");
+                return;
+            }
+
+            EnsureSettingsListExists(advSettings);
+            var settingsList = GetSettingsList(advSettings);
+            if (settingsList == null || settingsList.Count == 0)
+            {
+                mergeLog.AppendLine("AAS controller gen: settings list empty.");
+                return;
+            }
+
+            // Pull Base + Override from AAS tab
+            var aasBase = GetAASBaseControllerFromSettings(advSettings);
+            var aasOverride = GetAASOverrideControllerFromSettings(advSettings);
+
+            const string rootFolder = "Assets/NDMF Merge Generated";
+            if (!AssetDatabase.IsValidFolder(rootFolder))
+                AssetDatabase.CreateFolder("Assets", "NDMF Merge Generated");
+
+            string avatarName = targetCVRAvatar.gameObject.name.Replace("(Clone)", "").Trim();
+            string safeAvatarName = SanitizeFileName(avatarName);
+
+            // Prefix controller name + filename consistently to avoid Unity warning
+            string controllerBaseName = $"{NDMF_PREFIX}{safeAvatarName}_AAS";
+            string controllerSafeName = SanitizeFileName(controllerBaseName);
+            string controllerPath = $"{rootFolder}/{controllerSafeName}.controller";
+
+            // Start from AAS Base if present, else fallback
+            AnimatorController newController = null;
+
+            if (aasBase != null)
+            {
+                var baseAC = aasBase as AnimatorController;
+                if (baseAC != null)
+                {
+                    newController = UnityEngine.Object.Instantiate(baseAC);
+                    newController.name = controllerSafeName;
+                    mergeLog.AppendLine($"AAS controller gen: using AAS Base Controller '{baseAC.name}'");
+                }
+                else
+                {
+                    mergeLog.AppendLine("AAS controller gen: WARNING - AAS Base Controller is not an AnimatorController; falling back.");
+                }
+            }
+
+            if (newController == null)
+            {
+                var preferred = GetPreferredController(targetCVRAvatar);
+                if (preferred != null)
+                {
+                    newController = UnityEngine.Object.Instantiate(preferred);
+                    newController.name = controllerSafeName;
+                    mergeLog.AppendLine($"AAS controller gen: fallback to preferred controller '{preferred.name}'");
+                }
+                else
+                {
+                    newController = AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
+                    newController.name = controllerSafeName;
+                    mergeLog.AppendLine("AAS controller gen: no base found; created empty controller.");
+                }
+            }
+
+            // Ensure asset at path
+            if (!AssetDatabase.Contains(newController))
+            {
+                var existing = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
+                if (existing != null)
+                    AssetDatabase.DeleteAsset(controllerPath);
+
+                AssetDatabase.CreateAsset(newController, controllerPath);
+            }
+
+            string animFolder = $"{rootFolder}/{safeAvatarName}_AAS_Anims";
+            if (!AssetDatabase.IsValidFolder(animFolder))
+                AssetDatabase.CreateFolder(rootFolder, $"{safeAvatarName}_AAS_Anims");
+
+            int createdLayers = 0;
+
+            foreach (var entry in settingsList)
+            {
+                if (entry == null) continue;
+
+                string machineName = GetEntryMachineName(entry);
+                if (string.IsNullOrEmpty(machineName)) continue;
+
+                if (newController.layers.Any(l => l != null && l.name == machineName))
+                    continue;
+
+                var settingProp = entry.GetType().GetProperty("setting");
+                var settingObj = settingProp?.GetValue(entry);
+                if (settingObj == null) continue;
+
+                var setupMethod = settingObj.GetType().GetMethod(
+                    "SetupAnimator",
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance);
+
+                if (setupMethod == null) continue;
+
+                try
+                {
+                    object[] args =
+                    {
+                        newController,
+                        machineName,
+                        animFolder,
+                        SanitizeFileName(machineName)
+                    };
+
+                    setupMethod.Invoke(settingObj, args);
+                    newController = args[0] as AnimatorController ?? newController;
+
+                    createdLayers++;
+                }
+                catch (Exception ex)
+                {
+                    mergeLog.AppendLine($"AAS controller gen: failed '{machineName}': {ex.Message}");
+                }
+            }
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+
+            EditorUtility.SetDirty(newController);
+
+            // -------- Create final override controller for CVRAvatar --------
+            string overrideDisplayName = $"{NDMF_PREFIX}{safeAvatarName}_AAS_Override";
+            string overrideSafeName = SanitizeFileName(overrideDisplayName);
+            string overridePath = $"{rootFolder}/{overrideSafeName}.overrideController";
+
+            AnimatorOverrideController finalOverride;
+
+            var existingOverride = AssetDatabase.LoadAssetAtPath<AnimatorOverrideController>(overridePath);
+            if (existingOverride != null)
+            {
+                finalOverride = existingOverride;
+                finalOverride.runtimeAnimatorController = newController;
+            }
+            else
+            {
+                finalOverride = new AnimatorOverrideController(newController);
+                finalOverride.name = overrideSafeName;
+                AssetDatabase.CreateAsset(finalOverride, overridePath);
+            }
+
+            // If AAS Override exists, copy its clip overrides into ours
+            var aasAOC = aasOverride as AnimatorOverrideController;
+            if (aasAOC != null)
+            {
+                CopyAnimatorOverrides(aasAOC, finalOverride);
+                mergeLog.AppendLine($"AAS controller gen: copied overrides from AAS Override '{aasAOC.name}'");
+            }
+            else if (aasOverride != null)
+            {
+                mergeLog.AppendLine("AAS controller gen: WARNING - AAS Override Controller is not an AnimatorOverrideController; ignored.");
+            }
+
+            EditorUtility.SetDirty(finalOverride);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+
+            // Assign override to CVRAvatar "Animation Overrides" AND make it Actual Controller
+            TrySetOverrideControllerOnAvatar(targetCVRAvatar, finalOverride);
+            TrySetActualControllerOnAvatar(targetCVRAvatar, finalOverride);
+
+            EditorUtility.SetDirty(targetCVRAvatar);
+
+            mergeLog.AppendLine($"AAS controller gen: added {createdLayers} new AAS layers. Controller: {controllerPath}");
+            mergeLog.AppendLine($"AAS controller gen: created/assigned override as Actual Controller: {overridePath}");
+        }
+
+        private string SanitizeFileName(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "Unnamed";
+            foreach (char c in System.IO.Path.GetInvalidFileNameChars())
+                s = s.Replace(c, '_');
+            return s;
+        }
+
+        // ------------------------------------------------------------
+        // Helpers: read Base/Override from Advanced Settings tab
+        // ------------------------------------------------------------
+        private RuntimeAnimatorController GetAASBaseControllerFromSettings(object advSettings)
+        {
+            if (advSettings == null) return null;
+            var t = advSettings.GetType();
+
+            var candidates = new[]
+            {
+                "baseAnimatorController",
+                "baseAnimator",
+                "baseController",
+                "baseAnimationController"
+            };
+
+            foreach (var name in candidates)
+            {
+                var f = t.GetField(name);
+                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
+                    return f.GetValue(advSettings) as RuntimeAnimatorController;
+
+                var p = t.GetProperty(name);
+                if (p != null && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
+                    return p.GetValue(advSettings) as RuntimeAnimatorController;
+            }
+
+            return null;
+        }
+
+        private RuntimeAnimatorController GetAASOverrideControllerFromSettings(object advSettings)
+        {
+            if (advSettings == null) return null;
+            var t = advSettings.GetType();
+
+            var candidates = new[]
+            {
+                "overrideAnimatorController",
+                "overrideAnimator",
+                "overrideController",
+                "animationOverrideController",
+                "animationOverrides"
+            };
+
+            foreach (var name in candidates)
+            {
+                var f = t.GetField(name);
+                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
+                    return f.GetValue(advSettings) as RuntimeAnimatorController;
+
+                var p = t.GetProperty(name);
+                if (p != null && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
+                    return p.GetValue(advSettings) as RuntimeAnimatorController;
+            }
+
+            return null;
+        }
+
+        private void CopyAnimatorOverrides(AnimatorOverrideController src, AnimatorOverrideController dst)
+        {
+            if (src == null || dst == null) return;
+
+            var list = new List<KeyValuePair<AnimationClip, AnimationClip>>();
+            src.GetOverrides(list);
+            if (list.Count == 0) return;
+
+            dst.ApplyOverrides(list);
+            EditorUtility.SetDirty(dst);
+        }
+
+        // Assigns to CVRAvatar Animation Overrides slot (field/property names vary by CCK version)
+        private void TrySetOverrideControllerOnAvatar(Component cvrAvatar, AnimatorOverrideController overrideController)
+        {
+            if (cvrAvatar == null || overrideController == null) return;
+
+            var t = cvrAvatar.GetType();
+            var candidates = new[]
+            {
+                "animationOverrides",
+                "animationOverrideController",
+                "overrideController",
+                "overrideAnimatorController",
+                "animatorOverrides",
+                "animOverrides",
+                "overrides"
+            };
+
+            foreach (var name in candidates)
+            {
+                var f = t.GetField(name);
+                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
+                {
+                    f.SetValue(cvrAvatar, overrideController);
+                    EditorUtility.SetDirty(cvrAvatar);
+                    mergeLog.AppendLine($"AAS controller gen: set CVRAvatar.{name} (field) to override.");
+                    return;
+                }
+
+                var p = t.GetProperty(name);
+                if (p != null && p.CanWrite && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
+                {
+                    p.SetValue(cvrAvatar, overrideController);
+                    EditorUtility.SetDirty(cvrAvatar);
+                    mergeLog.AppendLine($"AAS controller gen: set CVRAvatar.{name} (property) to override.");
+                    return;
+                }
+            }
+
+            mergeLog.AppendLine("AAS controller gen: WARNING - Could not find CVRAvatar Animation Overrides field/property.");
         }
 
         // ----------------------------
@@ -227,7 +633,7 @@ namespace NDMFMerge.Editor
             {
                 if (merger.mergeAdvancedPointerTrigger) MergeAdvancedPointerTrigger(outfitRoot);
                 if (merger.mergeParameterStream) MergeParameterStream(outfitRoot, targetCVRAvatar);
-                if (merger.mergeAnimatorDriver) MergeAnimatorDriver(outfitRoot, targetCVRAvatar); // legacy add; split done later
+                if (merger.mergeAnimatorDriver) MergeAnimatorDriver(outfitRoot, targetCVRAvatar);
             }
 
             var remainingChildren = new List<Transform>();
@@ -243,7 +649,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Animator merge (UPDATED)
+        // Animator merge (unchanged)
         // ----------------------------
         private void MergeAnimators(BuildContext ctx, CVRMergeArmature merger)
         {
@@ -269,7 +675,6 @@ namespace NDMFMerge.Editor
 
                 bool basic = outfitEntry.mergeAnimator;
                 bool includeAAS = outfitEntry.mergeAnimatorIncludingAAS;
-
                 if (!basic && !includeAAS) continue;
 
                 var outfitAvatar = outfitEntry.outfit.GetComponentInChildren(targetCVRAvatar.GetType(), true);
@@ -286,7 +691,6 @@ namespace NDMFMerge.Editor
                 var srcAC = srcController as AnimatorController;
                 if (srcAC == null) continue;
 
-                // Identify AAS autogenerated layers (layer.name == any parameter name)
                 var paramNames = new HashSet<string>(srcAC.parameters.Select(p => p.name));
 
                 foreach (var layer in srcAC.layers)
@@ -295,7 +699,7 @@ namespace NDMFMerge.Editor
 
                     bool isAutoLayer = paramNames.Contains(layer.name);
                     if (basic && isAutoLayer && !includeAAS)
-                        continue; // skip autogenerated layers in basic mode
+                        continue;
 
                     var clonedSM = UnityEngine.Object.Instantiate(layer.stateMachine);
 
@@ -326,7 +730,6 @@ namespace NDMFMerge.Editor
 
         private AnimatorController GetPreferredController(Component cvrAvatar)
         {
-            // Priority: Actual/Generated controller if exists, else Base, else Animator component controller.
             var t = cvrAvatar.GetType();
             var candidates = new[]
             {
@@ -391,7 +794,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Parameter Stream (SAFE MERGE)
+        // Parameter Stream (unchanged)
         // ----------------------------
         private void MergeParameterStream(Transform sourceTransform, Component targetCVRAvatar)
         {
@@ -420,7 +823,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Animator Driver merge (UPDATED + SPLIT)
+        // Animator Driver merge + split (unchanged)
         // ----------------------------
         private class DriverEntry
         {
@@ -467,17 +870,14 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // Destroy old drivers
             foreach (var d in allDrivers)
                 UnityEngine.Object.DestroyImmediate(d);
 
             if (entries.Count == 0) return;
 
-            // Create container
             var containerGO = new GameObject("NDMF Merge Animator Drivers");
             containerGO.transform.SetParent(avatarRoot, false);
 
-            // Rebuild drivers in chunks of 16
             int idx = 0;
             int driverIndex = 0;
             while (idx < entries.Count)
@@ -527,7 +927,6 @@ namespace NDMFMerge.Editor
             f.SetValue(driver, value);
         }
 
-        // Legacy per-outfit merge: just appends entries; final split rebuilds them.
         private void MergeAnimatorDriver(Transform sourceTransform, Component targetCVRAvatar)
         {
             var animatorDriverType = FindTypeInLoadedAssemblies("ABI.CCK.Components.CVRAnimatorDriver");
@@ -536,7 +935,6 @@ namespace NDMFMerge.Editor
             var sourceDrivers = sourceTransform.GetComponentsInChildren(animatorDriverType, true);
             if (sourceDrivers.Length == 0) return;
 
-            // Ensure at least one driver on target so entries exist
             var targetDriver = targetCVRAvatar.GetComponent(animatorDriverType);
             if (targetDriver == null) targetDriver = targetCVRAvatar.gameObject.AddComponent(animatorDriverType);
 
@@ -564,9 +962,6 @@ namespace NDMFMerge.Editor
                     tgtAnim.Add(srcAnim[i]);
                     tgtParams.Add(srcParams[i]);
                     tgtTypes.Add(srcTypes[i]);
-
-                    // Value float fields will be re-collected/split later;
-                    // we don't set them here to avoid overflow.
                 }
             }
 
@@ -574,7 +969,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Advanced Avatar Settings merge (kept from previous fix)
+        // Advanced Avatar Settings merge (unchanged)
         // ----------------------------
         private void MergeAdvancedAvatarSettings(CVRMergeArmature merger, Component sourceCVRAvatar, Component targetCVRAvatar)
         {
@@ -949,7 +1344,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Remaining helpers from your plugin (unchanged)
+        // Remaining helpers (unchanged)
         // ----------------------------
 
         private Transform FindArmatureInOutfit(Transform root)
@@ -1287,7 +1682,11 @@ namespace NDMFMerge.Editor
         private void RemapComponentTransformField(Component component, string fieldName, Dictionary<Transform, Transform> boneMap)
         {
             var type = component.GetType();
-            var field = type.GetField(fieldName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var field = type.GetField(fieldName,
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+
             if (field != null && field.FieldType == typeof(Transform))
             {
                 var currentTransform = field.GetValue(component) as Transform;
@@ -1299,7 +1698,11 @@ namespace NDMFMerge.Editor
         private void RemapComponentTransformList(Component component, string fieldName, Dictionary<Transform, Transform> boneMap)
         {
             var type = component.GetType();
-            var field = type.GetField(fieldName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var field = type.GetField(fieldName,
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+
             if (field != null && typeof(IList).IsAssignableFrom(field.FieldType))
             {
                 var list = field.GetValue(component) as IList;
