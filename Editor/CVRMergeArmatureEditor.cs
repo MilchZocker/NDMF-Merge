@@ -90,8 +90,6 @@ namespace NDMFMerge.Editor
 
             outfitsList.elementHeightCallback = (int index) =>
             {
-                var element = outfitsList.serializedProperty.GetArrayElementAtIndex(index);
-
                 float line = EditorGUIUtility.singleLineHeight;
                 float height = 0;
 
@@ -262,7 +260,18 @@ namespace NDMFMerge.Editor
             if (merger.mergeAdvancedAvatarSetup)
             {
                 EditorGUI.indentLevel++;
+
+                // NEW: show post-merge AAS controller generation toggle
+                EditorGUILayout.PropertyField(
+                    serializedObject.FindProperty("generateAASControllerAtEnd"),
+                    new GUIContent(
+                        "Generate AAS Controller At End",
+                        "After all merges, run CVR 'Create Controller' to generate the AAS animator from merged entries."
+                    )
+                );
+
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("advancedSettingsPrefix"));
+
                 EditorGUI.indentLevel--;
             }
 
