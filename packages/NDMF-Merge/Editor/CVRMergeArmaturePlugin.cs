@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.Animations;
 using UnityEditor;
@@ -176,7 +177,6 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // After all outfits are merged: rebuild animator drivers cleanly if enabled
             if (merger.mergeAnimatorDriver)
             {
                 try
@@ -190,7 +190,6 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // Destroy cloned outfits
             foreach (var outfitRoot in clonedOutfits)
             {
                 if (outfitRoot != null)
@@ -200,19 +199,353 @@ namespace NDMFMerge.Editor
             // === POST-MERGE FINALIZATION STEPS (RESOLVING) ===
             try
             {
+                // UNIVERSAL FIX (v2): serialized deep sweep + reflection deep sweep.
+                RemapExternalReferencesUniversal(ctx.AvatarRootTransform);
+
                 // Rebuild Magica data here (still fine in Resolving)
                 RebuildMagicaData(ctx.AvatarRootTransform);
 
-                mergeLog.AppendLine("Post-merge finalization complete (Magica rebuild).");
+                mergeLog.AppendLine("Post-merge finalization complete (universal external ref remap + Magica rebuild).");
             }
             catch (Exception ex)
             {
                 mergeLog.AppendLine($"  ERROR in post-merge finalization: {ex.Message}");
                 Debug.LogError($"[NDMF Merge] Post-merge finalization failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
 
-            // IMPORTANT: do NOT destroy merger here anymore.
-            // We need it in Transforming to decide about AAS controller generation.
+        // ============================================================
+        // UNIVERSAL POST-MERGE REMAPPER (Serialized + Reflection)
+        // ============================================================
+        private void RemapExternalReferencesUniversal(Transform avatarRoot)
+        {
+            if (avatarRoot == null) return;
+
+            mergeLog.AppendLine("Remapping ALL external references to NDMF clone (universal v2)...");
+
+            var allComponents = avatarRoot.GetComponentsInChildren<Component>(true);
+
+            int changedComponents = 0;
+            int serializedRemapped = 0, serializedNulled = 0;
+            int reflectionRemapped = 0, reflectionNulled = 0;
+
+            foreach (var comp in allComponents)
+            {
+                if (comp == null) continue;
+                if (comp is Transform) continue;
+
+                bool compChanged = false;
+
+                // ---- PASS 1: SerializedProperty deep sweep (include hidden) ----
+                try
+                {
+                    var so = new SerializedObject(comp);
+                    var prop = so.GetIterator();
+
+                    // Next(true) traverses everything, not just "visible"
+                    bool enterChildren = true;
+                    while (prop.Next(enterChildren))
+                    {
+                        enterChildren = true;
+
+                        if (prop.propertyType != SerializedPropertyType.ObjectReference &&
+                            prop.propertyType != SerializedPropertyType.ExposedReference)
+                            continue;
+
+                        UnityEngine.Object objRef = prop.objectReferenceValue;
+                        if (objRef == null) continue;
+
+                        if (!IsSceneObjectOutsideClone(objRef, avatarRoot, out var refTransform))
+                            continue;
+
+                        var mappedTransform = TryResolveTransformInClone(avatarRoot, refTransform);
+
+                        UnityEngine.Object newObj = null;
+                        if (mappedTransform != null)
+                            newObj = ConvertMappedObject(objRef, mappedTransform);
+
+                        if (newObj != null)
+                        {
+                            prop.objectReferenceValue = newObj;
+                            serializedRemapped++;
+                            compChanged = true;
+                        }
+                        else
+                        {
+                            prop.objectReferenceValue = null;
+                            serializedNulled++;
+                            compChanged = true;
+                        }
+                    }
+
+                    if (compChanged)
+                    {
+                        so.ApplyModifiedPropertiesWithoutUndo();
+                        EditorUtility.SetDirty(comp);
+                    }
+                }
+                catch
+                {
+                    // ignore unserializable components; reflection pass may still catch.
+                }
+
+                // ---- PASS 2: Reflection deep sweep (fields + managed graphs) ----
+                try
+                {
+                    var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                    if (ReflectionRemapObjectGraph(comp, avatarRoot, visited,
+                            ref reflectionRemapped, ref reflectionNulled))
+                    {
+                        compChanged = true;
+                        EditorUtility.SetDirty(comp);
+                    }
+                }
+                catch
+                {
+                    // if reflection fails for a component, don't kill bake.
+                }
+
+                if (compChanged) changedComponents++;
+            }
+
+            mergeLog.AppendLine(
+                $"Universal ref remap done. Components changed: {changedComponents}.\n" +
+                $"  Serialized pass -> remapped: {serializedRemapped}, nulled: {serializedNulled}\n" +
+                $"  Reflection pass -> remapped: {reflectionRemapped}, nulled: {reflectionNulled}"
+            );
+        }
+
+        private bool IsSceneObjectOutsideClone(UnityEngine.Object objRef, Transform avatarRoot, out Transform refTransform)
+        {
+            refTransform = null;
+
+            if (objRef is GameObject go) refTransform = go.transform;
+            else if (objRef is Component c) refTransform = c.transform;
+            else if (objRef is Transform t) refTransform = t;
+
+            if (refTransform == null) return false;         // assets or non-scene objects OK
+            if (refTransform.IsChildOf(avatarRoot)) return false;
+
+            return true;
+        }
+
+        private UnityEngine.Object ConvertMappedObject(UnityEngine.Object oldObj, Transform mappedTransform)
+        {
+            if (oldObj is GameObject) return mappedTransform.gameObject;
+            if (oldObj is Transform) return mappedTransform;
+
+            if (oldObj is Component oldComp)
+            {
+                var mappedComp = mappedTransform.GetComponent(oldComp.GetType());
+                if (mappedComp != null) return mappedComp;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Reflection deep sweep over an object graph.
+        /// Remaps/Nulls any UnityEngine.Object scene refs that point outside avatarRoot.
+        /// Returns true if anything was changed.
+        /// </summary>
+        private bool ReflectionRemapObjectGraph(
+            object rootObj,
+            Transform avatarRoot,
+            HashSet<object> visited,
+            ref int remappedCount,
+            ref int nulledCount)
+        {
+            if (rootObj == null) return false;
+
+            // Avoid infinite loops on graphs
+            if (!visited.Add(rootObj)) return false;
+
+            bool changed = false;
+
+            var type = rootObj.GetType();
+            if (type.IsPrimitive || type.IsEnum || type == typeof(string)) return false;
+
+            // UnityEngine.Objects: check & possibly replace directly only if we were passed one.
+            if (rootObj is UnityEngine.Object uo)
+            {
+                if (IsSceneObjectOutsideClone(uo, avatarRoot, out var refT))
+                {
+                    var mappedT = TryResolveTransformInClone(avatarRoot, refT);
+                    var newObj = mappedT != null ? ConvertMappedObject(uo, mappedT) : null;
+
+                    // can't assign here because caller owns the field;
+                    // so we just report no direct replace.
+                    // fields holding UnityEngine.Object handled below.
+                    return false;
+                }
+                return false;
+            }
+
+            // Lists/arrays
+            if (rootObj is IList list)
+            {
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var item = list[i];
+                    if (item == null) continue;
+
+                    if (item is UnityEngine.Object listObj &&
+                        IsSceneObjectOutsideClone(listObj, avatarRoot, out var refT))
+                    {
+                        var mappedT = TryResolveTransformInClone(avatarRoot, refT);
+                        var newObj = mappedT != null ? ConvertMappedObject(listObj, mappedT) : null;
+
+                        if (newObj != null)
+                        {
+                            list[i] = newObj;
+                            remappedCount++;
+                        }
+                        else
+                        {
+                            list[i] = null;
+                            nulledCount++;
+                        }
+
+                        changed = true;
+                        continue;
+                    }
+
+                    // recurse into non-Unity objects
+                    if (!(item is UnityEngine.Object))
+                        changed |= ReflectionRemapObjectGraph(item, avatarRoot, visited,
+                            ref remappedCount, ref nulledCount);
+                }
+
+                return changed;
+            }
+
+            // Fields (public + private + [SerializeField])
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var fields = type.GetFields(flags);
+
+            foreach (var field in fields)
+            {
+                if (field.IsNotSerialized) continue;
+
+                bool isPublic = field.IsPublic;
+                bool hasSerializeField = field.GetCustomAttribute<SerializeField>() != null;
+
+                // Only touch what Unity might serialize OR what Magica uses privately.
+                if (!isPublic && !hasSerializeField)
+                    continue;
+
+                var fType = field.FieldType;
+                var value = field.GetValue(rootObj);
+                if (value == null) continue;
+
+                // Direct UnityEngine.Object reference
+                if (typeof(UnityEngine.Object).IsAssignableFrom(fType))
+                {
+                    var uoVal = value as UnityEngine.Object;
+                    if (uoVal != null &&
+                        IsSceneObjectOutsideClone(uoVal, avatarRoot, out var refT))
+                    {
+                        var mappedT = TryResolveTransformInClone(avatarRoot, refT);
+                        var newObj = mappedT != null ? ConvertMappedObject(uoVal, mappedT) : null;
+
+                        if (newObj != null && fType.IsAssignableFrom(newObj.GetType()))
+                        {
+                            field.SetValue(rootObj, newObj);
+                            remappedCount++;
+                        }
+                        else
+                        {
+                            field.SetValue(rootObj, null);
+                            nulledCount++;
+                        }
+
+                        changed = true;
+                        continue;
+                    }
+
+                    continue; // assets OK
+                }
+
+                // Recurse into arrays
+                if (fType.IsArray)
+                {
+                    var arr = value as Array;
+                    if (arr == null) continue;
+
+                    for (int i = 0; i < arr.Length; i++)
+                    {
+                        var item = arr.GetValue(i);
+                        if (item == null) continue;
+
+                        if (item is UnityEngine.Object arrObj &&
+                            IsSceneObjectOutsideClone(arrObj, avatarRoot, out var refT))
+                        {
+                            var mappedT = TryResolveTransformInClone(avatarRoot, refT);
+                            var newObj = mappedT != null ? ConvertMappedObject(arrObj, mappedT) : null;
+
+                            if (newObj != null)
+                            {
+                                arr.SetValue(newObj, i);
+                                remappedCount++;
+                            }
+                            else
+                            {
+                                arr.SetValue(null, i);
+                                nulledCount++;
+                            }
+
+                            changed = true;
+                            continue;
+                        }
+
+                        if (!(item is UnityEngine.Object))
+                            changed |= ReflectionRemapObjectGraph(item, avatarRoot, visited,
+                                ref remappedCount, ref nulledCount);
+                    }
+
+                    continue;
+                }
+
+                // Recurse into nested objects/classes/structs
+                if (!fType.IsPrimitive && !fType.IsEnum && fType != typeof(string))
+                {
+                    changed |= ReflectionRemapObjectGraph(value, avatarRoot, visited,
+                        ref remappedCount, ref nulledCount);
+                }
+            }
+
+            return changed;
+        }
+
+        /// <summary>
+        /// Attempts to find a Transform inside avatarRoot that corresponds
+        /// to an external Transform by matching largest possible suffix paths.
+        /// Robust against differing prefab/clone roots.
+        /// </summary>
+        private Transform TryResolveTransformInClone(Transform avatarRoot, Transform external)
+        {
+            if (avatarRoot == null || external == null) return null;
+
+            var names = new List<string>();
+            var cur = external;
+            while (cur != null)
+            {
+                names.Add(cur.name);
+                cur = cur.parent;
+            }
+            names.Reverse();
+
+            for (int start = 0; start < names.Count; start++)
+            {
+                var candidatePath = string.Join("/", names.Skip(start));
+                var found = avatarRoot.Find(candidatePath);
+                if (found != null) return found;
+            }
+
+            var byName = FindBoneByName(avatarRoot, external.name);
+            if (byName != null) return byName;
+
+            return null;
         }
 
         // ------------------------------------------------------------
@@ -220,7 +553,6 @@ namespace NDMFMerge.Editor
         // ------------------------------------------------------------
         private void RebuildMagicaData(Transform avatarRoot)
         {
-            // 1) Render deformers first
             var renderDeformers = avatarRoot.GetComponentsInChildren<MagicaRenderDeformer>(true).ToList();
             mergeLog.AppendLine($"Rebuilding MagicaRenderDeformer data: {renderDeformers.Count}");
             foreach (var rd in renderDeformers)
@@ -230,7 +562,6 @@ namespace NDMFMerge.Editor
                 EditorUtility.SetDirty(rd);
             }
 
-            // 2) Virtual deformers second
             var virtualDeformers = avatarRoot.GetComponentsInChildren<MagicaVirtualDeformer>(true).ToList();
             mergeLog.AppendLine($"Rebuilding MagicaVirtualDeformer data: {virtualDeformers.Count}");
             foreach (var vd in virtualDeformers)
@@ -240,7 +571,6 @@ namespace NDMFMerge.Editor
                 EditorUtility.SetDirty(vd);
             }
 
-            // 3) Bone cloth third
             var boneCloths = avatarRoot.GetComponentsInChildren<MagicaBoneCloth>(true).ToList();
             mergeLog.AppendLine($"Rebuilding MagicaBoneCloth data: {boneCloths.Count}");
             foreach (var bc in boneCloths)
@@ -250,7 +580,6 @@ namespace NDMFMerge.Editor
                 EditorUtility.SetDirty(bc);
             }
 
-            // 4) Mesh cloth last
             var meshCloths = avatarRoot.GetComponentsInChildren<MagicaMeshCloth>(true).ToList();
             mergeLog.AppendLine($"Rebuilding MagicaMeshCloth data: {meshCloths.Count}");
             foreach (var mc in meshCloths)
@@ -263,9 +592,14 @@ namespace NDMFMerge.Editor
 
         // ------------------------------------------------------------
         // POST-MERGE: AAS controller generation (runs AFTER MergeAnimators)
-        // Uses AAS Base/Override from Advanced Settings tab
-        // Creates an Override Controller and assigns it to CVRAvatar Animation Overrides
-        // DOES NOT TOUCH Unity Animator
+        // Logic:
+        // 1) Start from avatarSettings.baseController
+        // 2) Generate AAS layers/params onto it via SetupAnimator
+        // 3) Apply avatarSettings.baseOverrideController overrides to finished animator
+        // 4) Create new override controller referencing finished animator
+        // 5) Assign Override -> Animation Overrides slot
+        //    Assign Animator -> Actual Controller slot
+        // 6) Do NOT touch Unity Animator component
         // ------------------------------------------------------------
         private void GenerateAASControllerAtEnd(Component targetCVRAvatar)
         {
@@ -286,10 +620,6 @@ namespace NDMFMerge.Editor
                 return;
             }
 
-            // Pull Base + Override from AAS tab
-            var aasBase = GetAASBaseControllerFromSettings(advSettings);
-            var aasOverride = GetAASOverrideControllerFromSettings(advSettings);
-
             const string rootFolder = "Assets/NDMF Merge Generated";
             if (!AssetDatabase.IsValidFolder(rootFolder))
                 AssetDatabase.CreateFolder("Assets", "NDMF Merge Generated");
@@ -297,47 +627,44 @@ namespace NDMFMerge.Editor
             string avatarName = targetCVRAvatar.gameObject.name.Replace("(Clone)", "").Trim();
             string safeAvatarName = SanitizeFileName(avatarName);
 
-            // Prefix controller name + filename consistently to avoid Unity warning
-            string controllerBaseName = $"{NDMF_PREFIX}{safeAvatarName}_AAS";
-            string controllerSafeName = SanitizeFileName(controllerBaseName);
-            string controllerPath = $"{rootFolder}/{controllerSafeName}.controller";
+            string controllerBaseName = $"{safeAvatarName}_AAS";
+            string controllerPath = $"{rootFolder}/{controllerBaseName}.controller";
 
-            // Start from AAS Base if present, else fallback
-            AnimatorController newController = null;
+            // ============================================================
+            // 1) START FROM Advanced Settings BASE CONTROLLER
+            // ============================================================
+            RuntimeAnimatorController baseRuntime = null;
+            RuntimeAnimatorController baseOverrideRuntime = null;
 
-            if (aasBase != null)
             {
-                var baseAC = aasBase as AnimatorController;
-                if (baseAC != null)
-                {
-                    newController = UnityEngine.Object.Instantiate(baseAC);
-                    newController.name = controllerSafeName;
-                    mergeLog.AppendLine($"AAS controller gen: using AAS Base Controller '{baseAC.name}'");
-                }
-                else
-                {
-                    mergeLog.AppendLine("AAS controller gen: WARNING - AAS Base Controller is not an AnimatorController; falling back.");
-                }
+                // avatarSettings.baseController
+                var fBase = advSettings.GetType().GetField("baseController");
+                if (fBase != null)
+                    baseRuntime = fBase.GetValue(advSettings) as RuntimeAnimatorController;
+
+                // avatarSettings.baseOverrideController
+                var fBaseOv = advSettings.GetType().GetField("baseOverrideController");
+                if (fBaseOv != null)
+                    baseOverrideRuntime = fBaseOv.GetValue(advSettings) as RuntimeAnimatorController;
             }
 
-            if (newController == null)
+            AnimatorController baseController = null;
+
+            if (baseRuntime is AnimatorController ac)
+                baseController = ac;
+            else if (baseRuntime is AnimatorOverrideController aoc && aoc.runtimeAnimatorController is AnimatorController bac)
+                baseController = bac;
+
+            if (baseController == null)
             {
-                var preferred = GetPreferredController(targetCVRAvatar);
-                if (preferred != null)
-                {
-                    newController = UnityEngine.Object.Instantiate(preferred);
-                    newController.name = controllerSafeName;
-                    mergeLog.AppendLine($"AAS controller gen: fallback to preferred controller '{preferred.name}'");
-                }
-                else
-                {
-                    newController = AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
-                    newController.name = controllerSafeName;
-                    mergeLog.AppendLine("AAS controller gen: no base found; created empty controller.");
-                }
+                mergeLog.AppendLine("AAS controller gen: ERROR - avatarSettings.baseController missing or not an AnimatorController.");
+                return;
             }
 
-            // Ensure asset at path
+            // create new controller as clone of baseController
+            AnimatorController newController = UnityEngine.Object.Instantiate(baseController);
+            newController.name = controllerBaseName;
+
             if (!AssetDatabase.Contains(newController))
             {
                 var existing = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
@@ -351,6 +678,9 @@ namespace NDMFMerge.Editor
             if (!AssetDatabase.IsValidFolder(animFolder))
                 AssetDatabase.CreateFolder(rootFolder, $"{safeAvatarName}_AAS_Anims");
 
+            // ============================================================
+            // 2) GENERATE ALL AAS PARAMETERS/LAYERS ONTO THAT CONTROLLER
+            // ============================================================
             int createdLayers = 0;
 
             foreach (var entry in settingsList)
@@ -360,18 +690,13 @@ namespace NDMFMerge.Editor
                 string machineName = GetEntryMachineName(entry);
                 if (string.IsNullOrEmpty(machineName)) continue;
 
-                if (newController.layers.Any(l => l != null && l.name == machineName))
-                    continue;
-
                 var settingProp = entry.GetType().GetProperty("setting");
                 var settingObj = settingProp?.GetValue(entry);
                 if (settingObj == null) continue;
 
                 var setupMethod = settingObj.GetType().GetMethod(
                     "SetupAnimator",
-                    System.Reflection.BindingFlags.Public |
-                    System.Reflection.BindingFlags.NonPublic |
-                    System.Reflection.BindingFlags.Instance);
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
                 if (setupMethod == null) continue;
 
@@ -386,6 +711,8 @@ namespace NDMFMerge.Editor
                     };
 
                     setupMethod.Invoke(settingObj, args);
+
+                    // SetupAnimator may replace controller by ref
                     newController = args[0] as AnimatorController ?? newController;
 
                     createdLayers++;
@@ -399,147 +726,98 @@ namespace NDMFMerge.Editor
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
 
-            EditorUtility.SetDirty(newController);
+            // ============================================================
+            // 3) APPLY baseOverrideController OVERRIDES TO FINISHED ANIMATOR
+            // ============================================================
+            AnimatorOverrideController appliedOverrides = null;
 
-            // -------- Create final override controller for CVRAvatar --------
-            string overrideDisplayName = $"{NDMF_PREFIX}{safeAvatarName}_AAS_Override";
+            if (baseOverrideRuntime is AnimatorOverrideController baseOv)
+            {
+                // clone base overrides and point at our finished animator
+                appliedOverrides = UnityEngine.Object.Instantiate(baseOv);
+                appliedOverrides.runtimeAnimatorController = newController;
+
+                // Keep names/filenames aligned to avoid NDMF warnings
+                appliedOverrides.name = $"{safeAvatarName}_aas_overrides";
+                string appliedOvPath = $"{rootFolder}/{SanitizeFileName(appliedOverrides.name)}.overrideController";
+
+                var existingApplied = AssetDatabase.LoadAssetAtPath<AnimatorOverrideController>(appliedOvPath);
+                if (existingApplied != null) AssetDatabase.DeleteAsset(appliedOvPath);
+                AssetDatabase.CreateAsset(appliedOverrides, appliedOvPath);
+
+                EditorUtility.SetDirty(appliedOverrides);
+            }
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+
+            // ============================================================
+            // 4) CREATE NEW OVERRIDE CONTROLLER THAT REFERENCES FINISHED ANIMATOR
+            //    AND CONTAINS THE APPLIED OVERRIDES
+            // ============================================================
+            string overrideDisplayName = $"{safeAvatarName}_AAS_Override";
             string overrideSafeName = SanitizeFileName(overrideDisplayName);
             string overridePath = $"{rootFolder}/{overrideSafeName}.overrideController";
 
-            AnimatorOverrideController finalOverride;
+            AnimatorOverrideController overrideController;
 
             var existingOverride = AssetDatabase.LoadAssetAtPath<AnimatorOverrideController>(overridePath);
             if (existingOverride != null)
             {
-                finalOverride = existingOverride;
-                finalOverride.runtimeAnimatorController = newController;
+                overrideController = existingOverride;
+                overrideController.runtimeAnimatorController = newController;
             }
             else
             {
-                finalOverride = new AnimatorOverrideController(newController);
-                finalOverride.name = overrideSafeName;
-                AssetDatabase.CreateAsset(finalOverride, overridePath);
+                overrideController = new AnimatorOverrideController(newController);
+                overrideController.name = overrideSafeName;
+                AssetDatabase.CreateAsset(overrideController, overridePath);
             }
 
-            // If AAS Override exists, copy its clip overrides into ours
-            var aasAOC = aasOverride as AnimatorOverrideController;
-            if (aasAOC != null)
+            // Copy mapping from the appliedOverrides into final override controller
+            if (appliedOverrides != null)
             {
-                CopyAnimatorOverrides(aasAOC, finalOverride);
-                mergeLog.AppendLine($"AAS controller gen: copied overrides from AAS Override '{aasAOC.name}'");
-            }
-            else if (aasOverride != null)
-            {
-                mergeLog.AppendLine("AAS controller gen: WARNING - AAS Override Controller is not an AnimatorOverrideController; ignored.");
+                var list = new List<KeyValuePair<AnimationClip, AnimationClip>>();
+                appliedOverrides.GetOverrides(list);
+                overrideController.ApplyOverrides(list);
             }
 
-            EditorUtility.SetDirty(finalOverride);
+            EditorUtility.SetDirty(overrideController);
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
 
-            // Assign override to CVRAvatar "Animation Overrides" AND make it Actual Controller
-            TrySetOverrideControllerOnAvatar(targetCVRAvatar, finalOverride);
-            TrySetActualControllerOnAvatar(targetCVRAvatar, finalOverride);
+            // ============================================================
+            // 5) ASSIGN:
+            //    Animation Overrides slot -> overrideController
+            //    Actual Controller slot    -> newController
+            // ============================================================
+            TrySetOverrideControllerOnAvatar(targetCVRAvatar, overrideController);
+            TrySetActualControllerOnAvatar(targetCVRAvatar, newController);
 
+            EditorUtility.SetDirty(newController);
             EditorUtility.SetDirty(targetCVRAvatar);
 
-            mergeLog.AppendLine($"AAS controller gen: added {createdLayers} new AAS layers. Controller: {controllerPath}");
-            mergeLog.AppendLine($"AAS controller gen: created/assigned override as Actual Controller: {overridePath}");
+            mergeLog.AppendLine($"AAS controller gen: added {createdLayers} AAS entries. Controller: {controllerPath}");
+            mergeLog.AppendLine($"AAS controller gen: applied base overrides (if any) and assigned final override to Animation Overrides: {overridePath}");
         }
 
-        private string SanitizeFileName(string s)
+        private void TrySetOverrideControllerOnAvatar(Component cvrAvatar, RuntimeAnimatorController controller)
         {
-            if (string.IsNullOrEmpty(s)) return "Unnamed";
-            foreach (char c in System.IO.Path.GetInvalidFileNameChars())
-                s = s.Replace(c, '_');
-            return s;
-        }
-
-        // ------------------------------------------------------------
-        // Helpers: read Base/Override from Advanced Settings tab
-        // ------------------------------------------------------------
-        private RuntimeAnimatorController GetAASBaseControllerFromSettings(object advSettings)
-        {
-            if (advSettings == null) return null;
-            var t = advSettings.GetType();
-
-            var candidates = new[]
-            {
-                "baseAnimatorController",
-                "baseAnimator",
-                "baseController",
-                "baseAnimationController"
-            };
-
-            foreach (var name in candidates)
-            {
-                var f = t.GetField(name);
-                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
-                    return f.GetValue(advSettings) as RuntimeAnimatorController;
-
-                var p = t.GetProperty(name);
-                if (p != null && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
-                    return p.GetValue(advSettings) as RuntimeAnimatorController;
-            }
-
-            return null;
-        }
-
-        private RuntimeAnimatorController GetAASOverrideControllerFromSettings(object advSettings)
-        {
-            if (advSettings == null) return null;
-            var t = advSettings.GetType();
-
-            var candidates = new[]
-            {
-                "overrideAnimatorController",
-                "overrideAnimator",
-                "overrideController",
-                "animationOverrideController",
-                "animationOverrides"
-            };
-
-            foreach (var name in candidates)
-            {
-                var f = t.GetField(name);
-                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
-                    return f.GetValue(advSettings) as RuntimeAnimatorController;
-
-                var p = t.GetProperty(name);
-                if (p != null && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
-                    return p.GetValue(advSettings) as RuntimeAnimatorController;
-            }
-
-            return null;
-        }
-
-        private void CopyAnimatorOverrides(AnimatorOverrideController src, AnimatorOverrideController dst)
-        {
-            if (src == null || dst == null) return;
-
-            var list = new List<KeyValuePair<AnimationClip, AnimationClip>>();
-            src.GetOverrides(list);
-            if (list.Count == 0) return;
-
-            dst.ApplyOverrides(list);
-            EditorUtility.SetDirty(dst);
-        }
-
-        // Assigns to CVRAvatar Animation Overrides slot (field/property names vary by CCK version)
-        private void TrySetOverrideControllerOnAvatar(Component cvrAvatar, AnimatorOverrideController overrideController)
-        {
-            if (cvrAvatar == null || overrideController == null) return;
+            if (cvrAvatar == null || controller == null) return;
 
             var t = cvrAvatar.GetType();
             var candidates = new[]
             {
                 "animationOverrides",
                 "animationOverrideController",
+                "animatorOverrideController",
                 "overrideController",
                 "overrideAnimatorController",
-                "animatorOverrides",
-                "animOverrides",
-                "overrides"
+                "avatarOverrideController",
+                "animationOverridesController",
+                "animationOverride",
+                "overrides",
+                "animOverrides"
             };
 
             foreach (var name in candidates)
@@ -547,7 +825,7 @@ namespace NDMFMerge.Editor
                 var f = t.GetField(name);
                 if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
                 {
-                    f.SetValue(cvrAvatar, overrideController);
+                    f.SetValue(cvrAvatar, controller);
                     EditorUtility.SetDirty(cvrAvatar);
                     mergeLog.AppendLine($"AAS controller gen: set CVRAvatar.{name} (field) to override.");
                     return;
@@ -556,14 +834,22 @@ namespace NDMFMerge.Editor
                 var p = t.GetProperty(name);
                 if (p != null && p.CanWrite && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
                 {
-                    p.SetValue(cvrAvatar, overrideController);
+                    p.SetValue(cvrAvatar, controller);
                     EditorUtility.SetDirty(cvrAvatar);
                     mergeLog.AppendLine($"AAS controller gen: set CVRAvatar.{name} (property) to override.");
                     return;
                 }
             }
 
-            mergeLog.AppendLine("AAS controller gen: WARNING - Could not find CVRAvatar Animation Overrides field/property.");
+            mergeLog.AppendLine("AAS controller gen: WARNING - could not find CVRAvatar Animation Overrides slot by reflection.");
+        }
+
+        private string SanitizeFileName(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "Unnamed";
+            foreach (char c in System.IO.Path.GetInvalidFileNameChars())
+                s = s.Replace(c, '_');
+            return s;
         }
 
         // ----------------------------
@@ -667,7 +953,7 @@ namespace NDMFMerge.Editor
             }
 
             var newController = UnityEngine.Object.Instantiate(targetController);
-            newController.name = targetController.name + "_Merged";
+            newController.name = $"{NDMF_PREFIX}{targetController.name}_Merged";
 
             foreach (var outfitEntry in merger.outfitsToMerge)
             {
@@ -724,7 +1010,6 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            targetAnimator.runtimeAnimatorController = newController;
             TrySetActualControllerOnAvatar(targetCVRAvatar, newController);
         }
 
@@ -862,11 +1147,11 @@ namespace NDMFMerge.Editor
                 {
                     var a = animators[i] as Animator;
                     var p = paramNames[i] as string;
-                    var t = (int)paramTypes[i];
+                    var tVal = (int)paramTypes[i];
 
                     float v = GetDriverValue(d, i + 1);
 
-                    entries.Add(new DriverEntry { animator = a, param = p, type = t, value = v });
+                    entries.Add(new DriverEntry { animator = a, param = p, type = tVal, value = v });
                 }
             }
 
@@ -1110,9 +1395,9 @@ namespace NDMFMerge.Editor
         {
             var type = source.GetType();
             var fields = type.GetFields(
-                System.Reflection.BindingFlags.Public |
-                System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Instance);
 
             foreach (var field in fields)
             {
@@ -1132,9 +1417,9 @@ namespace NDMFMerge.Editor
             var newSetting = Activator.CreateInstance(settingType);
 
             var fields = settingType.GetFields(
-                System.Reflection.BindingFlags.Public |
-                System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Instance);
 
             foreach (var field in fields)
             {
@@ -1172,9 +1457,9 @@ namespace NDMFMerge.Editor
             var newOption = Activator.CreateInstance(optionType);
 
             var fields = optionType.GetFields(
-                System.Reflection.BindingFlags.Public |
-                System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Instance);
 
             foreach (var field in fields)
             {
@@ -1204,9 +1489,9 @@ namespace NDMFMerge.Editor
             var newTarget = Activator.CreateInstance(targetType);
 
             var fields = targetType.GetFields(
-                System.Reflection.BindingFlags.Public |
-                System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Instance);
 
             var treePathField = targetType.GetField("treePath");
             string treePath = treePathField?.GetValue(sourceTarget) as string;
@@ -1683,9 +1968,9 @@ namespace NDMFMerge.Editor
         {
             var type = component.GetType();
             var field = type.GetField(fieldName,
-                System.Reflection.BindingFlags.Public |
-                System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Instance);
 
             if (field != null && field.FieldType == typeof(Transform))
             {
@@ -1699,9 +1984,9 @@ namespace NDMFMerge.Editor
         {
             var type = component.GetType();
             var field = type.GetField(fieldName,
-                System.Reflection.BindingFlags.Public |
-                System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Instance);
 
             if (field != null && typeof(IList).IsAssignableFrom(field.FieldType))
             {
@@ -1726,6 +2011,16 @@ namespace NDMFMerge.Editor
                 if (type != null) return type;
             }
             return null;
+        }
+
+        // ============================================================
+        // ReferenceEqualityComparer for visited-set in reflection pass
+        // ============================================================
+        private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+        {
+            public static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
+            public new bool Equals(object x, object y) => ReferenceEquals(x, y);
+            public int GetHashCode(object obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
         }
     }
 }
