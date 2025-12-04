@@ -15,7 +15,7 @@ NDMF Merge is a non-destructive armature and outfit merger for ChilloutVR avatar
 ## Requirements
 - Unity 2021.3+
 - ChilloutVR CCK installed in the project
-- [NDMF 1.5.0+](https://github.com/bdunderscore/ndmf) (dependency)
+- [NDMF 1.4.1](https://github.com/bdunderscore/ndmf) (dependency)
 - [Chillaxins 1.1.0+](https://docs.hai-vr.dev/docs/products/chillaxins) (VPM dependency)
 
 ## Installation
