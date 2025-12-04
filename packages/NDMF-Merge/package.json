@@ -9,7 +9,7 @@
     "url": "https://github.com/MilchZocker"
   },
   "dependencies": {
-    "nadena.dev.ndmf": "1.5.0"
+    "nadena.dev.ndmf": "1.4.1"
   },
   "vpmDependencies": {
     "dev.hai-vr.chillaxins": "1.1.0"
