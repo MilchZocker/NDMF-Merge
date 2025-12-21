@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Reflection;
+using System.IO;
 using UnityEngine;
 using UnityEngine.Animations;
 using UnityEditor;
@@ -24,8 +25,12 @@ namespace NDMFMerge.Editor
         public override string DisplayName => "NDMF Merge";
 
         private const string NDMF_PREFIX = "[NDMF]";
+        private const string ROOT_GEN_FOLDER = "Assets/NDMF Merge Generated";
 
         private StringBuilder mergeLog = new StringBuilder();
+
+        // Prevent double-generation per build
+        private static readonly HashSet<int> _aasGeneratedForAvatarInstance = new HashSet<int>();
 
         protected override void Configure()
         {
@@ -78,11 +83,12 @@ namespace NDMFMerge.Editor
                     }
                 });
 
-            // -------------- TRANSFORMING (AAS controller gen AFTER merge) --------------
+            // -------------- TRANSFORMING (AAS controller gen AFTER EVERYTHING) --------------
             InPhase(BuildPhase.Transforming)
                 .Run("Generate AAS Controller At End", ctx =>
                 {
                     var mergeComponents = ctx.AvatarRootTransform.GetComponentsInChildren<CVRMergeArmature>(true);
+
                     foreach (var merger in mergeComponents)
                     {
                         if (merger == null) continue;
@@ -92,12 +98,18 @@ namespace NDMFMerge.Editor
                         var cvrAvatar = merger.GetCVRAvatar();
                         if (cvrAvatar == null) continue;
 
+                        // Ensure only once per avatar per build
+                        int id = cvrAvatar.GetInstanceID();
+                        if (_aasGeneratedForAvatarInstance.Contains(id)) continue;
+                        _aasGeneratedForAvatarInstance.Add(id);
+
                         try
                         {
                             GenerateAASControllerAtEnd(cvrAvatar);
                         }
                         catch (Exception ex)
                         {
+                            mergeLog.AppendLine($"AAS end-gen: CreateAASController invoke failed: {ex.Message}");
                             Debug.LogError($"[NDMF Merge] AAS controller generation failed: {ex.Message}\n{ex.StackTrace}", merger);
                         }
                     }
@@ -108,6 +120,8 @@ namespace NDMFMerge.Editor
                         if (merger != null)
                             UnityEngine.Object.DestroyImmediate(merger);
                     }
+
+                    Debug.Log(mergeLog.ToString());
                 });
         }
 
@@ -242,7 +256,6 @@ namespace NDMFMerge.Editor
                     var so = new SerializedObject(comp);
                     var prop = so.GetIterator();
 
-                    // Next(true) traverses everything, not just "visible"
                     bool enterChildren = true;
                     while (prop.Next(enterChildren))
                     {
@@ -323,7 +336,7 @@ namespace NDMFMerge.Editor
             else if (objRef is Component c) refTransform = c.transform;
             else if (objRef is Transform t) refTransform = t;
 
-            if (refTransform == null) return false;         // assets or non-scene objects OK
+            if (refTransform == null) return false;
             if (refTransform.IsChildOf(avatarRoot)) return false;
 
             return true;
@@ -343,11 +356,6 @@ namespace NDMFMerge.Editor
             return null;
         }
 
-        /// <summary>
-        /// Reflection deep sweep over an object graph.
-        /// Remaps/Nulls any UnityEngine.Object scene refs that point outside avatarRoot.
-        /// Returns true if anything was changed.
-        /// </summary>
         private bool ReflectionRemapObjectGraph(
             object rootObj,
             Transform avatarRoot,
@@ -356,8 +364,6 @@ namespace NDMFMerge.Editor
             ref int nulledCount)
         {
             if (rootObj == null) return false;
-
-            // Avoid infinite loops on graphs
             if (!visited.Add(rootObj)) return false;
 
             bool changed = false;
@@ -365,23 +371,9 @@ namespace NDMFMerge.Editor
             var type = rootObj.GetType();
             if (type.IsPrimitive || type.IsEnum || type == typeof(string)) return false;
 
-            // UnityEngine.Objects: check & possibly replace directly only if we were passed one.
-            if (rootObj is UnityEngine.Object uo)
-            {
-                if (IsSceneObjectOutsideClone(uo, avatarRoot, out var refT))
-                {
-                    var mappedT = TryResolveTransformInClone(avatarRoot, refT);
-                    var newObj = mappedT != null ? ConvertMappedObject(uo, mappedT) : null;
-
-                    // can't assign here because caller owns the field;
-                    // so we just report no direct replace.
-                    // fields holding UnityEngine.Object handled below.
-                    return false;
-                }
+            if (rootObj is UnityEngine.Object)
                 return false;
-            }
 
-            // Lists/arrays
             if (rootObj is IList list)
             {
                 for (int i = 0; i < list.Count; i++)
@@ -410,7 +402,6 @@ namespace NDMFMerge.Editor
                         continue;
                     }
 
-                    // recurse into non-Unity objects
                     if (!(item is UnityEngine.Object))
                         changed |= ReflectionRemapObjectGraph(item, avatarRoot, visited,
                             ref remappedCount, ref nulledCount);
@@ -419,7 +410,6 @@ namespace NDMFMerge.Editor
                 return changed;
             }
 
-            // Fields (public + private + [SerializeField])
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
             var fields = type.GetFields(flags);
 
@@ -429,8 +419,6 @@ namespace NDMFMerge.Editor
 
                 bool isPublic = field.IsPublic;
                 bool hasSerializeField = field.GetCustomAttribute<SerializeField>() != null;
-
-                // Only touch what Unity might serialize OR what Magica uses privately.
                 if (!isPublic && !hasSerializeField)
                     continue;
 
@@ -438,7 +426,6 @@ namespace NDMFMerge.Editor
                 var value = field.GetValue(rootObj);
                 if (value == null) continue;
 
-                // Direct UnityEngine.Object reference
                 if (typeof(UnityEngine.Object).IsAssignableFrom(fType))
                 {
                     var uoVal = value as UnityEngine.Object;
@@ -463,10 +450,9 @@ namespace NDMFMerge.Editor
                         continue;
                     }
 
-                    continue; // assets OK
+                    continue;
                 }
 
-                // Recurse into arrays
                 if (fType.IsArray)
                 {
                     var arr = value as Array;
@@ -506,7 +492,6 @@ namespace NDMFMerge.Editor
                     continue;
                 }
 
-                // Recurse into nested objects/classes/structs
                 if (!fType.IsPrimitive && !fType.IsEnum && fType != typeof(string))
                 {
                     changed |= ReflectionRemapObjectGraph(value, avatarRoot, visited,
@@ -517,11 +502,6 @@ namespace NDMFMerge.Editor
             return changed;
         }
 
-        /// <summary>
-        /// Attempts to find a Transform inside avatarRoot that corresponds
-        /// to an external Transform by matching largest possible suffix paths.
-        /// Robust against differing prefab/clone roots.
-        /// </summary>
         private Transform TryResolveTransformInClone(Transform avatarRoot, Transform external)
         {
             if (avatarRoot == null || external == null) return null;
@@ -591,15 +571,8 @@ namespace NDMFMerge.Editor
         }
 
         // ------------------------------------------------------------
-        // POST-MERGE: AAS controller generation (runs AFTER MergeAnimators)
-        // Logic:
-        // 1) Start from avatarSettings.baseController
-        // 2) Generate AAS layers/params onto it via SetupAnimator
-        // 3) Apply avatarSettings.baseOverrideController overrides to finished animator
-        // 4) Create new override controller referencing finished animator
-        // 5) Assign Override -> Animation Overrides slot
-        //    Assign Animator -> Actual Controller slot
-        // 6) Do NOT touch Unity Animator component
+        // POST-MERGE: AAS controller generation (CCK CreateAASController port)
+        // Runs AFTER all merges and ref fixes.
         // ------------------------------------------------------------
         private void GenerateAASControllerAtEnd(Component targetCVRAvatar)
         {
@@ -608,7 +581,7 @@ namespace NDMFMerge.Editor
             var advSettings = GetAdvancedAvatarSettings(targetCVRAvatar);
             if (advSettings == null)
             {
-                mergeLog.AppendLine("AAS controller gen: No avatarSettings found on target.");
+                mergeLog.AppendLine("AAS end-gen: No avatarSettings found on target.");
                 return;
             }
 
@@ -616,40 +589,49 @@ namespace NDMFMerge.Editor
             var settingsList = GetSettingsList(advSettings);
             if (settingsList == null || settingsList.Count == 0)
             {
-                mergeLog.AppendLine("AAS controller gen: settings list empty.");
+                mergeLog.AppendLine("AAS end-gen: settings list empty.");
                 return;
             }
 
-            const string rootFolder = "Assets/NDMF Merge Generated";
-            if (!AssetDatabase.IsValidFolder(rootFolder))
-                AssetDatabase.CreateFolder("Assets", "NDMF Merge Generated");
+            EnsureRootFolder();
 
-            string avatarName = targetCVRAvatar.gameObject.name.Replace("(Clone)", "").Trim();
+            string avatarName = targetCVRAvatar.gameObject.name;
             string safeAvatarName = SanitizeFileName(avatarName);
+            string avatarAASFolder = $"{ROOT_GEN_FOLDER}/{safeAvatarName}_AAS";
+            string controllerPath = $"{avatarAASFolder}/{safeAvatarName}_aas.controller";
+            string overridePath    = $"{avatarAASFolder}/{safeAvatarName}_aas_overrides.overrideController";
+            string animFolder      = $"{avatarAASFolder}/{safeAvatarName}_AAS_Anims";
 
-            string controllerBaseName = $"{safeAvatarName}_AAS";
-            string controllerPath = $"{rootFolder}/{controllerBaseName}.controller";
+            if (!AssetDatabase.IsValidFolder(avatarAASFolder))
+                AssetDatabase.CreateFolder(ROOT_GEN_FOLDER, $"{safeAvatarName}_AAS");
+            if (!AssetDatabase.IsValidFolder(animFolder))
+                AssetDatabase.CreateFolder(avatarAASFolder, $"{safeAvatarName}_AAS_Anims");
+            else
+            {
+                // FIX: Instead of nuking the folder, clear the animation files inside it.
+                // This prevents "AssetDatabase Desync" but removes stale animations.
+                var animGUIDs = AssetDatabase.FindAssets("", new[] { animFolder });
+                foreach(var guid in animGUIDs)
+                {
+                    AssetDatabase.DeleteAsset(AssetDatabase.GUIDToAssetPath(guid));
+                }
+            }
 
-            // ============================================================
-            // 1) START FROM Advanced Settings BASE CONTROLLER
-            // ============================================================
+            // 1) Pick base controller like CCK
             RuntimeAnimatorController baseRuntime = null;
             RuntimeAnimatorController baseOverrideRuntime = null;
 
             {
-                // avatarSettings.baseController
                 var fBase = advSettings.GetType().GetField("baseController");
                 if (fBase != null)
                     baseRuntime = fBase.GetValue(advSettings) as RuntimeAnimatorController;
 
-                // avatarSettings.baseOverrideController
                 var fBaseOv = advSettings.GetType().GetField("baseOverrideController");
                 if (fBaseOv != null)
                     baseOverrideRuntime = fBaseOv.GetValue(advSettings) as RuntimeAnimatorController;
             }
 
             AnimatorController baseController = null;
-
             if (baseRuntime is AnimatorController ac)
                 baseController = ac;
             else if (baseRuntime is AnimatorOverrideController aoc && aoc.runtimeAnimatorController is AnimatorController bac)
@@ -657,38 +639,46 @@ namespace NDMFMerge.Editor
 
             if (baseController == null)
             {
-                mergeLog.AppendLine("AAS controller gen: ERROR - avatarSettings.baseController missing or not an AnimatorController.");
+                mergeLog.AppendLine("AAS end-gen: ERROR - avatarSettings.baseController missing or not AnimatorController.");
                 return;
             }
 
-            // create new controller as clone of baseController
-            AnimatorController newController = UnityEngine.Object.Instantiate(baseController);
-            newController.name = controllerBaseName;
-
-            if (!AssetDatabase.Contains(newController))
+            // 2) Load or Create Controller using CopySerialized to preserve GUID
+            // === FIX: Reuse existing asset if present ===
+            AnimatorController newController = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
+            if (newController != null)
             {
-                var existing = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
-                if (existing != null)
-                    AssetDatabase.DeleteAsset(controllerPath);
+                 // Overwrite content with base controller (cleans it essentially)
+                 EditorUtility.CopySerialized(baseController, newController);
+                 newController.name = $"{safeAvatarName}_aas"; // Restore name
+            }
+            else
+            {
+                 // Create fresh
+                 newController = UnityEngine.Object.Instantiate(baseController);
+                 newController.name = $"{safeAvatarName}_aas";
+                 AssetDatabase.CreateAsset(newController, controllerPath);
+            }
+            // === END FIX ===
 
-                AssetDatabase.CreateAsset(newController, controllerPath);
+            var baseParams = new HashSet<string>();
+            foreach (var p in newController.parameters)
+            {
+                if (p == null) continue;
+                if (string.IsNullOrEmpty(p.name)) continue;
+                if (p.name.StartsWith("#")) continue;
+                baseParams.Add(p.name);
             }
 
-            string animFolder = $"{rootFolder}/{safeAvatarName}_AAS_Anims";
-            if (!AssetDatabase.IsValidFolder(animFolder))
-                AssetDatabase.CreateFolder(rootFolder, $"{safeAvatarName}_AAS_Anims");
-
-            // ============================================================
-            // 2) GENERATE ALL AAS PARAMETERS/LAYERS ONTO THAT CONTROLLER
-            // ============================================================
-            int createdLayers = 0;
-
+            // 3) For each entry: SetupAnimator(ref animator,...)
+            int createdEntries = 0;
             foreach (var entry in settingsList)
             {
                 if (entry == null) continue;
-
                 string machineName = GetEntryMachineName(entry);
                 if (string.IsNullOrEmpty(machineName)) continue;
+
+                if (baseParams.Contains(machineName)) continue;
 
                 var settingProp = entry.GetType().GetProperty("setting");
                 var settingObj = settingProp?.GetValue(entry);
@@ -704,122 +694,154 @@ namespace NDMFMerge.Editor
                 {
                     object[] args =
                     {
-                        newController,
+                        newController, // ref in CCK
                         machineName,
                         animFolder,
                         SanitizeFileName(machineName)
                     };
 
                     setupMethod.Invoke(settingObj, args);
-
-                    // SetupAnimator may replace controller by ref
                     newController = args[0] as AnimatorController ?? newController;
-
-                    createdLayers++;
+                    createdEntries++;
                 }
                 catch (Exception ex)
                 {
-                    mergeLog.AppendLine($"AAS controller gen: failed '{machineName}': {ex.Message}");
+                    mergeLog.AppendLine($"AAS end-gen: SetupAnimator failed '{machineName}': {ex.Message}");
                 }
             }
 
+            EditorUtility.SetDirty(newController);
+            AssetDatabase.SaveAssets(); // Save controller changes
+
+            // Store on avatarSettings like CCK does
+            SetAdvAnimator(advSettings, newController);
+
+            // 4) Overrides
+            AnimatorOverrideController overrideController = FixOrCreateOverrideController(
+                advSettings,
+                baseOverrideRuntime,
+                newController,
+                overridePath,
+                safeAvatarName);
+
+            // 5) Assign to CVRAvatar fields:
+            AttachCreatedOverrideToAvatar(targetCVRAvatar, overrideController);
+            TrySetActualControllerOnAvatar(targetCVRAvatar, newController);
+
+            EditorUtility.SetDirty(targetCVRAvatar);
             AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
+            
+            mergeLog.AppendLine($"AAS end-gen: added {createdEntries} AAS entries.");
+        }
 
-            // ============================================================
-            // 3) APPLY baseOverrideController OVERRIDES TO FINISHED ANIMATOR
-            // ============================================================
-            AnimatorOverrideController appliedOverrides = null;
+        private void EnsureRootFolder()
+        {
+            if (!AssetDatabase.IsValidFolder(ROOT_GEN_FOLDER))
+                AssetDatabase.CreateFolder("Assets", "NDMF Merge Generated");
+        }
 
-            if (baseOverrideRuntime is AnimatorOverrideController baseOv)
+        private void SetAdvAnimator(object advSettings, AnimatorController animator)
+        {
+            if (advSettings == null) return;
+            var f = advSettings.GetType().GetField("animator");
+            if (f != null && typeof(AnimatorController).IsAssignableFrom(f.FieldType))
+                f.SetValue(advSettings, animator);
+        }
+
+        private AnimatorOverrideController FixOrCreateOverrideController(
+            object advSettings,
+            RuntimeAnimatorController baseOverrideRuntime,
+            AnimatorController generatedAnimator,
+            string overridePath,
+            string safeAvatarName)
+        {
+            AnimatorOverrideController overrides = AssetDatabase.LoadAssetAtPath<AnimatorOverrideController>(overridePath);
+
+            // === FIX: Reuse existing override if present ===
+            if (overrides != null)
             {
-                // clone base overrides and point at our finished animator
-                appliedOverrides = UnityEngine.Object.Instantiate(baseOv);
-                appliedOverrides.runtimeAnimatorController = newController;
-
-                // Keep names/filenames aligned to avoid NDMF warnings
-                appliedOverrides.name = $"{safeAvatarName}_aas_overrides";
-                string appliedOvPath = $"{rootFolder}/{SanitizeFileName(appliedOverrides.name)}.overrideController";
-
-                var existingApplied = AssetDatabase.LoadAssetAtPath<AnimatorOverrideController>(appliedOvPath);
-                if (existingApplied != null) AssetDatabase.DeleteAsset(appliedOvPath);
-                AssetDatabase.CreateAsset(appliedOverrides, appliedOvPath);
-
-                EditorUtility.SetDirty(appliedOverrides);
-            }
-
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-
-            // ============================================================
-            // 4) CREATE NEW OVERRIDE CONTROLLER THAT REFERENCES FINISHED ANIMATOR
-            //    AND CONTAINS THE APPLIED OVERRIDES
-            // ============================================================
-            string overrideDisplayName = $"{safeAvatarName}_AAS_Override";
-            string overrideSafeName = SanitizeFileName(overrideDisplayName);
-            string overridePath = $"{rootFolder}/{overrideSafeName}.overrideController";
-
-            AnimatorOverrideController overrideController;
-
-            var existingOverride = AssetDatabase.LoadAssetAtPath<AnimatorOverrideController>(overridePath);
-            if (existingOverride != null)
-            {
-                overrideController = existingOverride;
-                overrideController.runtimeAnimatorController = newController;
+                if (baseOverrideRuntime is AnimatorOverrideController baseOv)
+                {
+                     EditorUtility.CopySerialized(baseOv, overrides);
+                     overrides.name = $"{safeAvatarName}_aas_overrides";
+                }
+                else
+                {
+                     // If no base, we clear the existing one by creating a blank and copying it over
+                     // Or just resetting the controller field. CopySerialized is safer for deep clean.
+                     var blank = new AnimatorOverrideController();
+                     EditorUtility.CopySerialized(blank, overrides);
+                     overrides.name = $"{safeAvatarName}_aas_overrides";
+                     UnityEngine.Object.DestroyImmediate(blank);
+                }
             }
             else
             {
-                overrideController = new AnimatorOverrideController(newController);
-                overrideController.name = overrideSafeName;
-                AssetDatabase.CreateAsset(overrideController, overridePath);
+                // Create New
+                if (baseOverrideRuntime is AnimatorOverrideController baseOv)
+                {
+                    overrides = UnityEngine.Object.Instantiate(baseOv);
+                }
+                else
+                {
+                    overrides = new AnimatorOverrideController();
+                }
+                
+                overrides.name = $"{safeAvatarName}_aas_overrides";
+                AssetDatabase.CreateAsset(overrides, overridePath);
             }
+            // === END FIX ===
 
-            // Copy mapping from the appliedOverrides into final override controller
-            if (appliedOverrides != null)
+            overrides.runtimeAnimatorController = generatedAnimator;
+            EditorUtility.SetDirty(overrides);
+
+            // write back to avatarSettings.overrides
+            var fOv = advSettings.GetType().GetField("overrides");
+            if (fOv != null && typeof(AnimatorOverrideController).IsAssignableFrom(fOv.FieldType))
+                fOv.SetValue(advSettings, overrides);
+
+            return overrides;
+        }
+
+        private void AttachCreatedOverrideToAvatar(Component avatarComp, AnimatorOverrideController overrideController)
+        {
+            if (avatarComp == null || overrideController == null) return;
+            Undo.RecordObject(avatarComp, "Attach created Override to Avatar");
+
+            var f = avatarComp.GetType().GetField("overrides");
+            if (f != null && typeof(AnimatorOverrideController).IsAssignableFrom(f.FieldType))
             {
-                var list = new List<KeyValuePair<AnimationClip, AnimationClip>>();
-                appliedOverrides.GetOverrides(list);
-                overrideController.ApplyOverrides(list);
+                f.SetValue(avatarComp, overrideController);
+                EditorUtility.SetDirty(avatarComp);
+                return;
             }
 
-            EditorUtility.SetDirty(overrideController);
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-
-            // ============================================================
-            // 5) ASSIGN:
-            //    Animation Overrides slot -> overrideController
-            //    Actual Controller slot    -> newController
-            // ============================================================
-            TrySetOverrideControllerOnAvatar(targetCVRAvatar, overrideController);
-            TrySetActualControllerOnAvatar(targetCVRAvatar, newController);
-
-            EditorUtility.SetDirty(newController);
-            EditorUtility.SetDirty(targetCVRAvatar);
-
-            mergeLog.AppendLine($"AAS controller gen: added {createdLayers} AAS entries. Controller: {controllerPath}");
-            mergeLog.AppendLine($"AAS controller gen: applied base overrides (if any) and assigned final override to Animation Overrides: {overridePath}");
+            TrySetOverrideControllerOnAvatar(avatarComp, overrideController);
         }
 
         private void TrySetOverrideControllerOnAvatar(Component cvrAvatar, RuntimeAnimatorController controller)
         {
             if (cvrAvatar == null || controller == null) return;
-
             var t = cvrAvatar.GetType();
-            var candidates = new[]
+            
+            // Priority Fields
+            var fields = new[] { "overrides", "animationOverrides", "avatarOverrideController" };
+            foreach(var name in fields)
             {
-                "animationOverrides",
-                "animationOverrideController",
-                "animatorOverrideController",
-                "overrideController",
-                "overrideAnimatorController",
-                "avatarOverrideController",
-                "animationOverridesController",
-                "animationOverride",
-                "overrides",
-                "animOverrides"
-            };
+                var f = t.GetField(name);
+                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
+                {
+                    f.SetValue(cvrAvatar, controller);
+                    EditorUtility.SetDirty(cvrAvatar);
+                    return;
+                }
+            }
+        }
 
+        private void TrySetActualControllerOnAvatar(Component cvrAvatar, RuntimeAnimatorController controller)
+        {
+            var t = cvrAvatar.GetType();
+            var candidates = new[] { "actualAnimatorController", "actualAnimator", "generatedAnimatorController" };
             foreach (var name in candidates)
             {
                 var f = t.GetField(name);
@@ -827,21 +849,9 @@ namespace NDMFMerge.Editor
                 {
                     f.SetValue(cvrAvatar, controller);
                     EditorUtility.SetDirty(cvrAvatar);
-                    mergeLog.AppendLine($"AAS controller gen: set CVRAvatar.{name} (field) to override.");
-                    return;
-                }
-
-                var p = t.GetProperty(name);
-                if (p != null && p.CanWrite && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
-                {
-                    p.SetValue(cvrAvatar, controller);
-                    EditorUtility.SetDirty(cvrAvatar);
-                    mergeLog.AppendLine($"AAS controller gen: set CVRAvatar.{name} (property) to override.");
                     return;
                 }
             }
-
-            mergeLog.AppendLine("AAS controller gen: WARNING - could not find CVRAvatar Animation Overrides slot by reflection.");
         }
 
         private string SanitizeFileName(string s)
@@ -1045,37 +1055,6 @@ namespace NDMFMerge.Editor
 
             var anim = cvrAvatar.GetComponent<Animator>();
             return anim != null ? anim.runtimeAnimatorController as AnimatorController : null;
-        }
-
-        private void TrySetActualControllerOnAvatar(Component cvrAvatar, RuntimeAnimatorController controller)
-        {
-            var t = cvrAvatar.GetType();
-            var candidates = new[]
-            {
-                "actualAnimatorController",
-                "actualAnimator",
-                "generatedAnimatorController",
-                "generatedAnimator",
-                "actualController"
-            };
-
-            foreach (var name in candidates)
-            {
-                var f = t.GetField(name);
-                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
-                {
-                    f.SetValue(cvrAvatar, controller);
-                    EditorUtility.SetDirty(cvrAvatar);
-                    return;
-                }
-                var p = t.GetProperty(name);
-                if (p != null && p.CanWrite && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
-                {
-                    p.SetValue(cvrAvatar, controller);
-                    EditorUtility.SetDirty(cvrAvatar);
-                    return;
-                }
-            }
         }
 
         // ----------------------------
@@ -1631,7 +1610,6 @@ namespace NDMFMerge.Editor
         // ----------------------------
         // Remaining helpers (unchanged)
         // ----------------------------
-
         private Transform FindArmatureInOutfit(Transform root)
         {
             var smr = root.GetComponentInChildren<SkinnedMeshRenderer>();
