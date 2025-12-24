@@ -6,13 +6,13 @@ using System.Text;
 using System.Reflection;
 using System.IO;
 using UnityEngine;
-using UnityEngine.Animations;
+using UnityEngine.Animations; // Required for ParentConstraint
 using UnityEditor;
 using UnityEditor.Animations;
 using nadena.dev.ndmf;
 using NDMFMerge.Runtime;
 
-// direct Magica API (no reflection)
+// Direct Magica API (ensure Magica Cloth is installed in the project)
 using MagicaCloth;
 
 [assembly: ExportsPlugin(typeof(NDMFMerge.Editor.CVRMergeArmaturePlugin))]
@@ -31,6 +31,9 @@ namespace NDMFMerge.Editor
 
         // Prevent double-generation per build
         private static readonly HashSet<int> _aasGeneratedForAvatarInstance = new HashSet<int>();
+
+        // [IMPROVEMENT] Cache types to prevent slow assembly iteration on every lookup
+        private static readonly Dictionary<string, Type> _typeCache = new Dictionary<string, Type>();
 
         protected override void Configure()
         {
@@ -87,41 +90,52 @@ namespace NDMFMerge.Editor
             InPhase(BuildPhase.Transforming)
                 .Run("Generate AAS Controller At End", ctx =>
                 {
-                    var mergeComponents = ctx.AvatarRootTransform.GetComponentsInChildren<CVRMergeArmature>(true);
-
-                    foreach (var merger in mergeComponents)
+                    // [IMPROVEMENT] Start batch editing to speed up asset creation/modification
+                    AssetDatabase.StartAssetEditing();
+                    try
                     {
-                        if (merger == null) continue;
-                        if (!merger.generateAASControllerAtEnd) continue;
-                        if (!merger.mergeAdvancedAvatarSetup) continue;
+                        var mergeComponents = ctx.AvatarRootTransform.GetComponentsInChildren<CVRMergeArmature>(true);
 
-                        var cvrAvatar = merger.GetCVRAvatar();
-                        if (cvrAvatar == null) continue;
-
-                        // Ensure only once per avatar per build
-                        int id = cvrAvatar.GetInstanceID();
-                        if (_aasGeneratedForAvatarInstance.Contains(id)) continue;
-                        _aasGeneratedForAvatarInstance.Add(id);
-
-                        try
+                        foreach (var merger in mergeComponents)
                         {
-                            GenerateAASControllerAtEnd(cvrAvatar);
+                            if (merger == null) continue;
+                            if (!merger.generateAASControllerAtEnd) continue;
+                            if (!merger.mergeAdvancedAvatarSetup) continue;
+
+                            var cvrAvatar = merger.GetCVRAvatar();
+                            if (cvrAvatar == null) continue;
+
+                            // Ensure only once per avatar per build
+                            int id = cvrAvatar.GetInstanceID();
+                            if (_aasGeneratedForAvatarInstance.Contains(id)) continue;
+                            _aasGeneratedForAvatarInstance.Add(id);
+
+                            try
+                            {
+                                GenerateAASControllerAtEnd(cvrAvatar);
+                            }
+                            catch (Exception ex)
+                            {
+                                mergeLog.AppendLine($"AAS end-gen: CreateAASController invoke failed: {ex.Message}");
+                                Debug.LogError($"[NDMF Merge] AAS controller generation failed: {ex.Message}\n{ex.StackTrace}", merger);
+                            }
                         }
-                        catch (Exception ex)
+
+                        // cleanup: NOW remove merger components from baked output
+                        foreach (var merger in mergeComponents)
                         {
-                            mergeLog.AppendLine($"AAS end-gen: CreateAASController invoke failed: {ex.Message}");
-                            Debug.LogError($"[NDMF Merge] AAS controller generation failed: {ex.Message}\n{ex.StackTrace}", merger);
+                            if (merger != null)
+                                UnityEngine.Object.DestroyImmediate(merger);
                         }
+
+                        Debug.Log(mergeLog.ToString());
                     }
-
-                    // cleanup: NOW remove merger components from baked output
-                    foreach (var merger in mergeComponents)
+                    finally
                     {
-                        if (merger != null)
-                            UnityEngine.Object.DestroyImmediate(merger);
+                        // [IMPROVEMENT] Stop batch editing and save
+                        AssetDatabase.StopAssetEditing();
+                        AssetDatabase.SaveAssets();
                     }
-
-                    Debug.Log(mergeLog.ToString());
                 });
         }
 
@@ -571,8 +585,7 @@ namespace NDMFMerge.Editor
         }
 
         // ------------------------------------------------------------
-        // POST-MERGE: AAS controller generation (CCK CreateAASController port)
-        // Runs AFTER all merges and ref fixes.
+        // POST-MERGE: AAS controller generation
         // ------------------------------------------------------------
         private void GenerateAASControllerAtEnd(Component targetCVRAvatar)
         {
@@ -599,8 +612,8 @@ namespace NDMFMerge.Editor
             string safeAvatarName = SanitizeFileName(avatarName);
             string avatarAASFolder = $"{ROOT_GEN_FOLDER}/{safeAvatarName}_AAS";
             string controllerPath = $"{avatarAASFolder}/{safeAvatarName}_aas.controller";
-            string overridePath    = $"{avatarAASFolder}/{safeAvatarName}_aas_overrides.overrideController";
-            string animFolder      = $"{avatarAASFolder}/{safeAvatarName}_AAS_Anims";
+            string overridePath = $"{avatarAASFolder}/{safeAvatarName}_aas_overrides.overrideController";
+            string animFolder = $"{avatarAASFolder}/{safeAvatarName}_AAS_Anims";
 
             if (!AssetDatabase.IsValidFolder(avatarAASFolder))
                 AssetDatabase.CreateFolder(ROOT_GEN_FOLDER, $"{safeAvatarName}_AAS");
@@ -608,16 +621,13 @@ namespace NDMFMerge.Editor
                 AssetDatabase.CreateFolder(avatarAASFolder, $"{safeAvatarName}_AAS_Anims");
             else
             {
-                // FIX: Instead of nuking the folder, clear the animation files inside it.
-                // This prevents "AssetDatabase Desync" but removes stale animations.
                 var animGUIDs = AssetDatabase.FindAssets("", new[] { animFolder });
-                foreach(var guid in animGUIDs)
+                foreach (var guid in animGUIDs)
                 {
                     AssetDatabase.DeleteAsset(AssetDatabase.GUIDToAssetPath(guid));
                 }
             }
 
-            // 1) Pick base controller like CCK
             RuntimeAnimatorController baseRuntime = null;
             RuntimeAnimatorController baseOverrideRuntime = null;
 
@@ -643,23 +653,19 @@ namespace NDMFMerge.Editor
                 return;
             }
 
-            // 2) Load or Create Controller using CopySerialized to preserve GUID
-            // === FIX: Reuse existing asset if present ===
+            // Reuse or create Controller
             AnimatorController newController = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
             if (newController != null)
             {
-                 // Overwrite content with base controller (cleans it essentially)
-                 EditorUtility.CopySerialized(baseController, newController);
-                 newController.name = $"{safeAvatarName}_aas"; // Restore name
+                EditorUtility.CopySerialized(baseController, newController);
+                newController.name = $"{safeAvatarName}_aas";
             }
             else
             {
-                 // Create fresh
-                 newController = UnityEngine.Object.Instantiate(baseController);
-                 newController.name = $"{safeAvatarName}_aas";
-                 AssetDatabase.CreateAsset(newController, controllerPath);
+                newController = UnityEngine.Object.Instantiate(baseController);
+                newController.name = $"{safeAvatarName}_aas";
+                AssetDatabase.CreateAsset(newController, controllerPath);
             }
-            // === END FIX ===
 
             var baseParams = new HashSet<string>();
             foreach (var p in newController.parameters)
@@ -670,7 +676,6 @@ namespace NDMFMerge.Editor
                 baseParams.Add(p.name);
             }
 
-            // 3) For each entry: SetupAnimator(ref animator,...)
             int createdEntries = 0;
             foreach (var entry in settingsList)
             {
@@ -694,7 +699,7 @@ namespace NDMFMerge.Editor
                 {
                     object[] args =
                     {
-                        newController, // ref in CCK
+                        newController,
                         machineName,
                         animFolder,
                         SanitizeFileName(machineName)
@@ -711,12 +716,10 @@ namespace NDMFMerge.Editor
             }
 
             EditorUtility.SetDirty(newController);
-            AssetDatabase.SaveAssets(); // Save controller changes
 
-            // Store on avatarSettings like CCK does
             SetAdvAnimator(advSettings, newController);
 
-            // 4) Overrides
+            // Overrides
             AnimatorOverrideController overrideController = FixOrCreateOverrideController(
                 advSettings,
                 baseOverrideRuntime,
@@ -724,20 +727,27 @@ namespace NDMFMerge.Editor
                 overridePath,
                 safeAvatarName);
 
-            // 5) Assign to CVRAvatar fields:
             AttachCreatedOverrideToAvatar(targetCVRAvatar, overrideController);
             TrySetActualControllerOnAvatar(targetCVRAvatar, newController);
 
             EditorUtility.SetDirty(targetCVRAvatar);
-            AssetDatabase.SaveAssets();
-            
+            // AssetDatabase.SaveAssets(); // Handled by Configure() block
+
             mergeLog.AppendLine($"AAS end-gen: added {createdEntries} AAS entries.");
         }
 
         private void EnsureRootFolder()
         {
             if (!AssetDatabase.IsValidFolder(ROOT_GEN_FOLDER))
-                AssetDatabase.CreateFolder("Assets", "NDMF Merge Generated");
+            {
+                // Must ensure Assets exists first (it always does), but the root gen folder might not
+                string[] split = ROOT_GEN_FOLDER.Split('/');
+                if (split.Length > 1)
+                {
+                    if (!AssetDatabase.IsValidFolder(ROOT_GEN_FOLDER))
+                        AssetDatabase.CreateFolder(split[0], split[1]);
+                }
+            }
         }
 
         private void SetAdvAnimator(object advSettings, AnimatorController animator)
@@ -757,27 +767,23 @@ namespace NDMFMerge.Editor
         {
             AnimatorOverrideController overrides = AssetDatabase.LoadAssetAtPath<AnimatorOverrideController>(overridePath);
 
-            // === FIX: Reuse existing override if present ===
             if (overrides != null)
             {
                 if (baseOverrideRuntime is AnimatorOverrideController baseOv)
                 {
-                     EditorUtility.CopySerialized(baseOv, overrides);
-                     overrides.name = $"{safeAvatarName}_aas_overrides";
+                    EditorUtility.CopySerialized(baseOv, overrides);
+                    overrides.name = $"{safeAvatarName}_aas_overrides";
                 }
                 else
                 {
-                     // If no base, we clear the existing one by creating a blank and copying it over
-                     // Or just resetting the controller field. CopySerialized is safer for deep clean.
-                     var blank = new AnimatorOverrideController();
-                     EditorUtility.CopySerialized(blank, overrides);
-                     overrides.name = $"{safeAvatarName}_aas_overrides";
-                     UnityEngine.Object.DestroyImmediate(blank);
+                    var blank = new AnimatorOverrideController();
+                    EditorUtility.CopySerialized(blank, overrides);
+                    overrides.name = $"{safeAvatarName}_aas_overrides";
+                    UnityEngine.Object.DestroyImmediate(blank);
                 }
             }
             else
             {
-                // Create New
                 if (baseOverrideRuntime is AnimatorOverrideController baseOv)
                 {
                     overrides = UnityEngine.Object.Instantiate(baseOv);
@@ -786,16 +792,14 @@ namespace NDMFMerge.Editor
                 {
                     overrides = new AnimatorOverrideController();
                 }
-                
+
                 overrides.name = $"{safeAvatarName}_aas_overrides";
                 AssetDatabase.CreateAsset(overrides, overridePath);
             }
-            // === END FIX ===
 
             overrides.runtimeAnimatorController = generatedAnimator;
             EditorUtility.SetDirty(overrides);
 
-            // write back to avatarSettings.overrides
             var fOv = advSettings.GetType().GetField("overrides");
             if (fOv != null && typeof(AnimatorOverrideController).IsAssignableFrom(fOv.FieldType))
                 fOv.SetValue(advSettings, overrides);
@@ -823,10 +827,9 @@ namespace NDMFMerge.Editor
         {
             if (cvrAvatar == null || controller == null) return;
             var t = cvrAvatar.GetType();
-            
-            // Priority Fields
+
             var fields = new[] { "overrides", "animationOverrides", "avatarOverrideController" };
-            foreach(var name in fields)
+            foreach (var name in fields)
             {
                 var f = t.GetField(name);
                 if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
@@ -863,7 +866,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Outfit merge (unchanged)
+        // Outfit merge (Standard)
         // ----------------------------
         private void MergeOutfitWithoutDestroy(BuildContext ctx, CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform outfitRoot, Transform targetArmature)
         {
@@ -893,7 +896,11 @@ namespace NDMFMerge.Editor
             if (!string.IsNullOrEmpty(outfitEntry.meshPrefix))
                 ApplyMeshPrefix(outfitRoot, outfitEntry.meshPrefix);
 
-            var boneMap = BuildBoneMappingWithConflicts(merger, outfitEntry, outfitArmature, targetArmature, usedBones);
+            // [NEW] Track bones that need to be constrained instead of merged
+            var bonesToConstraint = new List<(Transform source, Transform target)>();
+
+            // Pass this list to the builder to populate based on conflict resolution settings
+            var boneMap = BuildBoneMappingWithConflicts(merger, outfitEntry, outfitArmature, targetArmature, usedBones, bonesToConstraint);
             mergeLog.AppendLine($"  Bone map entries: {boneMap.Count}");
 
             var skinnedMeshes = outfitRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -907,6 +914,35 @@ namespace NDMFMerge.Editor
             }
 
             MergeHierarchy(outfitArmature, targetArmature, boneMap, merger, usedBones);
+
+            // [NEW] Handle Constraint Logic
+            foreach (var pair in bonesToConstraint)
+            {
+                var source = pair.source;
+                var target = pair.target;
+
+                if (source == null || target == null) continue;
+
+                // Move source to Avatar Root to keep it in the scene but separate from target hierarchy
+                source.SetParent(ctx.AvatarRootTransform, true);
+
+                var constraint = source.gameObject.AddComponent<ParentConstraint>();
+                var sourceParams = new ConstraintSource { sourceTransform = target, weight = 1f };
+                constraint.AddSource(sourceParams);
+
+                // Calculate relative offset to maintain current visual position (prevent snapping/warping)
+                // This simulates "keeping the mismatch" while following the target
+                Matrix4x4 targetInverse = target.worldToLocalMatrix;
+                Vector3 localPos = targetInverse.MultiplyPoint(source.position);
+                Quaternion localRot = Quaternion.Inverse(target.rotation) * source.rotation;
+
+                constraint.constraintActive = true;
+                constraint.locked = true;
+                constraint.SetTranslationOffset(0, localPos);
+                constraint.SetRotationOffset(0, localRot.eulerAngles);
+
+                mergeLog.AppendLine($"  [Constraint] Constrained {source.name} to {target.name} (Offset preserved)");
+            }
 
             foreach (var smr in skinnedMeshes)
             {
@@ -945,7 +981,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Animator merge (unchanged)
+        // Animator merge [IMPROVED: Order of Operations + WriteDefaults]
         // ----------------------------
         private void MergeAnimators(BuildContext ctx, CVRMergeArmature merger)
         {
@@ -962,9 +998,37 @@ namespace NDMFMerge.Editor
                 return;
             }
 
+            // [IMPROVEMENT] Detect Write Defaults from Base Controller (Layer 0)
+            bool? forceWD = null;
+            if (targetController.layers.Length > 0)
+            {
+                var state = targetController.layers[0].stateMachine.defaultState;
+                if (state != null) forceWD = state.writeDefaultValues;
+            }
+
             var newController = UnityEngine.Object.Instantiate(targetController);
             newController.name = $"{NDMF_PREFIX}{targetController.name}_Merged";
 
+            // [IMPROVEMENT] Pass 1: Collect and Add Parameters FIRST
+            // This prevents Unity from deleting transition conditions when layers are added.
+            foreach (var outfitEntry in merger.outfitsToMerge)
+            {
+                if (outfitEntry.outfit == null) continue;
+                if (!outfitEntry.mergeAnimator && !outfitEntry.mergeAnimatorIncludingAAS) continue;
+
+                var srcController = GetControllerFromOutfit(outfitEntry.outfit, targetCVRAvatar.GetType());
+                if (srcController == null) continue;
+
+                foreach (var param in srcController.parameters)
+                {
+                    if (!newController.parameters.Any(p => p.name == param.name))
+                    {
+                        newController.AddParameter(param.name, param.type);
+                    }
+                }
+            }
+
+            // [IMPROVEMENT] Pass 2: Copy Layers and Apply Write Defaults
             foreach (var outfitEntry in merger.outfitsToMerge)
             {
                 if (outfitEntry.outfit == null) continue;
@@ -973,23 +1037,12 @@ namespace NDMFMerge.Editor
                 bool includeAAS = outfitEntry.mergeAnimatorIncludingAAS;
                 if (!basic && !includeAAS) continue;
 
-                var outfitAvatar = outfitEntry.outfit.GetComponentInChildren(targetCVRAvatar.GetType(), true);
-                RuntimeAnimatorController srcController = null;
+                var srcController = GetControllerFromOutfit(outfitEntry.outfit, targetCVRAvatar.GetType());
+                if (srcController == null) continue;
 
-                if (outfitAvatar != null)
-                    srcController = GetPreferredController(outfitAvatar);
-                else
-                {
-                    var anim = outfitEntry.outfit.GetComponentInChildren<Animator>(true);
-                    srcController = anim != null ? anim.runtimeAnimatorController : null;
-                }
+                var paramNames = new HashSet<string>(srcController.parameters.Select(p => p.name));
 
-                var srcAC = srcController as AnimatorController;
-                if (srcAC == null) continue;
-
-                var paramNames = new HashSet<string>(srcAC.parameters.Select(p => p.name));
-
-                foreach (var layer in srcAC.layers)
+                foreach (var layer in srcController.layers)
                 {
                     if (layer == null) continue;
 
@@ -998,6 +1051,12 @@ namespace NDMFMerge.Editor
                         continue;
 
                     var clonedSM = UnityEngine.Object.Instantiate(layer.stateMachine);
+
+                    // [IMPROVEMENT] Force Write Defaults consistency
+                    if (forceWD.HasValue)
+                    {
+                        ApplyWriteDefaultsRecursive(clonedSM, forceWD.Value);
+                    }
 
                     var newLayer = new AnimatorControllerLayer
                     {
@@ -1012,15 +1071,38 @@ namespace NDMFMerge.Editor
 
                     newController.AddLayer(newLayer);
                 }
-
-                foreach (var param in srcAC.parameters)
-                {
-                    if (!newController.parameters.Any(p => p.name == param.name))
-                        newController.AddParameter(param.name, param.type);
-                }
             }
 
             TrySetActualControllerOnAvatar(targetCVRAvatar, newController);
+        }
+
+        private AnimatorController GetControllerFromOutfit(GameObject outfit, Type avatarType)
+        {
+            // Try getting from Avatar component
+            var outfitAvatar = outfit.GetComponentInChildren(avatarType, true);
+            if (outfitAvatar != null)
+            {
+                var ac = GetPreferredController(outfitAvatar);
+                if (ac != null) return ac;
+            }
+
+            // Fallback to Animator
+            var anim = outfit.GetComponentInChildren<Animator>(true);
+            return anim != null ? anim.runtimeAnimatorController as AnimatorController : null;
+        }
+
+        private void ApplyWriteDefaultsRecursive(AnimatorStateMachine sm, bool writeDefaults)
+        {
+            foreach (var state in sm.states)
+            {
+                if (state.state != null)
+                    state.state.writeDefaultValues = writeDefaults;
+            }
+            foreach (var childSm in sm.stateMachines)
+            {
+                if (childSm.stateMachine != null)
+                    ApplyWriteDefaultsRecursive(childSm.stateMachine, writeDefaults);
+            }
         }
 
         private AnimatorController GetPreferredController(Component cvrAvatar)
@@ -1058,7 +1140,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Parameter Stream (unchanged)
+        // Parameter Stream
         // ----------------------------
         private void MergeParameterStream(Transform sourceTransform, Component targetCVRAvatar)
         {
@@ -1087,7 +1169,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Animator Driver merge + split (unchanged)
+        // Animator Driver merge + split
         // ----------------------------
         private class DriverEntry
         {
@@ -1233,7 +1315,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Advanced Avatar Settings merge (unchanged)
+        // Advanced Avatar Settings merge
         // ----------------------------
         private void MergeAdvancedAvatarSettings(CVRMergeArmature merger, Component sourceCVRAvatar, Component targetCVRAvatar)
         {
@@ -1608,7 +1690,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Remaining helpers (unchanged)
+        // Remaining helpers
         // ----------------------------
         private Transform FindArmatureInOutfit(Transform root)
         {
@@ -1802,34 +1884,114 @@ namespace NDMFMerge.Editor
                 mergeLog.AppendLine($"  Prefixed {count} meshes with '{prefix}'");
         }
 
-        private Dictionary<Transform, Transform> BuildBoneMappingWithConflicts(CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform sourceRoot, Transform target, HashSet<Transform> usedBones)
+        // ============================================================
+        // CONFLICT RESOLUTION: BuildBoneMappingWithConflicts
+        // ============================================================
+        private Dictionary<Transform, Transform> BuildBoneMappingWithConflicts(
+            CVRMergeArmature merger,
+            OutfitToMerge outfitEntry,
+            Transform sourceRoot,
+            Transform target,
+            HashSet<Transform> usedBones,
+            List<(Transform, Transform)> bonesToConstraint)
         {
             var mapping = new Dictionary<Transform, Transform>();
+
+            // Create fast lookup for configured conflicts
+            var conflictLookup = new Dictionary<Transform, BoneConflictEntry>();
+            if (merger.boneConflicts != null)
+            {
+                foreach (var c in merger.boneConflicts)
+                {
+                    if (c != null && c.sourceBone != null)
+                        conflictLookup[c.sourceBone] = c;
+                }
+            }
 
             void MapBone(Transform sourceBone)
             {
                 if (merger.IsExcluded(sourceBone)) return;
+
+                // Only process bones that are actually used by meshes
                 if (!usedBones.Contains(sourceBone))
                 {
                     foreach (Transform child in sourceBone) MapBone(child);
                     return;
                 }
 
-                string boneName = sourceBone.name;
+                bool mapped = false;
 
-                if (!string.IsNullOrEmpty(outfitEntry.uniqueBonePrefix) && boneName.StartsWith(outfitEntry.uniqueBonePrefix))
+                // 1. Check for Explicit Conflicts (User defined resolutions)
+                if (conflictLookup.TryGetValue(sourceBone, out var conflict))
                 {
-                    foreach (Transform child in sourceBone) MapBone(child);
-                    return;
+                    switch (conflict.resolution)
+                    {
+                        case BoneConflictResolution.StillMerge:
+                            // Standard merge: Snap to target
+                            if (conflict.targetBone != null)
+                            {
+                                mapping[sourceBone] = conflict.targetBone;
+                                mapped = true;
+                            }
+                            break;
+
+                        case BoneConflictResolution.MergeIntoSelected:
+                            // Manual merge: Snap to user-selected target
+                            if (conflict.customTargetBone != null)
+                            {
+                                mapping[sourceBone] = conflict.customTargetBone;
+                                mapped = true;
+                            }
+                            break;
+
+                        case BoneConflictResolution.ConstraintToTarget:
+                            // Constraint: Do NOT map (prevents hierarchy merge).
+                            // Instead, add to list for ParentConstraint generation.
+                            if (conflict.targetBone != null)
+                            {
+                                bonesToConstraint.Add((sourceBone, conflict.targetBone));
+                                mapped = true; // Handled specially
+                            }
+                            break;
+
+                        case BoneConflictResolution.Rename:
+                            // Rename: Treat as unique bone. Do not map to target.
+                            sourceBone.name = sourceBone.name + "_Renamed";
+                            mapped = true; // Handled as unique
+                            break;
+
+                        case BoneConflictResolution.DontMerge:
+                            // Do nothing (Treat as unique).
+                            mapped = true;
+                            break;
+                    }
                 }
 
-                if (!string.IsNullOrEmpty(outfitEntry.prefix) && boneName.StartsWith(outfitEntry.prefix))
-                    boneName = boneName.Substring(outfitEntry.prefix.Length);
-                if (!string.IsNullOrEmpty(outfitEntry.suffix) && boneName.EndsWith(outfitEntry.suffix))
-                    boneName = boneName.Substring(0, boneName.Length - outfitEntry.suffix.Length);
+                // 2. Standard Name Matching (if not already handled by conflict logic)
+                if (!mapped)
+                {
+                    string boneName = sourceBone.name;
 
-                Transform targetBone = FindBoneByName(target, boneName);
-                if (targetBone != null) mapping[sourceBone] = targetBone;
+                    // Respect unique prefix (skip matching if it starts with unique prefix)
+                    if (!string.IsNullOrEmpty(outfitEntry.uniqueBonePrefix) && boneName.StartsWith(outfitEntry.uniqueBonePrefix))
+                    {
+                        foreach (Transform child in sourceBone) MapBone(child);
+                        return;
+                    }
+
+                    // Apply stripping rules
+                    if (!string.IsNullOrEmpty(outfitEntry.prefix) && boneName.StartsWith(outfitEntry.prefix))
+                        boneName = boneName.Substring(outfitEntry.prefix.Length);
+                    if (!string.IsNullOrEmpty(outfitEntry.suffix) && boneName.EndsWith(outfitEntry.suffix))
+                        boneName = boneName.Substring(0, boneName.Length - outfitEntry.suffix.Length);
+
+                    // Try to find matching bone on target
+                    Transform targetBone = FindBoneByName(target, boneName);
+                    if (targetBone != null)
+                    {
+                        mapping[sourceBone] = targetBone;
+                    }
+                }
 
                 foreach (Transform child in sourceBone) MapBone(child);
             }
@@ -1981,13 +2143,25 @@ namespace NDMFMerge.Editor
             // unchanged (placeholder)
         }
 
+        // [IMPROVEMENT] Use Cached Reflection
         private Type FindTypeInLoadedAssemblies(string typeName)
         {
+            if (string.IsNullOrEmpty(typeName)) return null;
+
+            if (_typeCache.TryGetValue(typeName, out Type cachedType))
+                return cachedType;
+
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 var type = assembly.GetType(typeName);
-                if (type != null) return type;
+                if (type != null)
+                {
+                    _typeCache[typeName] = type;
+                    return type;
+                }
             }
+
+            _typeCache[typeName] = null;
             return null;
         }
 
