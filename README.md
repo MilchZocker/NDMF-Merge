@@ -1,97 +1,129 @@
 # NDMF Merge for ChilloutVR
 
-NDMF Merge is a non-destructive armature and outfit merger for ChilloutVR avatars. It clones your base avatar during the NDMF bake, grafts selected outfits onto that clone, remaps references, and leaves the originals untouched. Use it to keep prefabs clean while rapidly iterating on outfits, Advanced Avatar Settings (AAS), and animator setups.
+**NDMF Merge** is a powerful, non-destructive tool for ChilloutVR (CVR) that merges outfits, accessories, and armatures onto your base avatar at build time.
 
-> **Complementary tool:** NDMF-Avatar-Optimizer is tuned to work alongside NDMF Merge. Run optimization after merging to keep the baked avatar lean.
+It allows you to keep your project clean by keeping outfits as separate prefabs. When you upload or enter Play Mode, the tool clones your avatar, grafts the outfits, handles bone merging, rebuilds physics, and generates the necessary controllers—all without touching your source files.
 
-## Features at a glance
-- Add a **CVR Merge Armature** component to your avatar and drive the entire merge from one inspector.
-- Merge multiple outfits or accessory armatures at build-time without modifying source prefabs.
-- Per-bone conflict detection with configurable resolutions (keep, rename, or skip).
-- Optional merging of CVR-specific systems (AAS, Parameter Stream, Animator Driver) and DynamicBone/Magica Cloth components.
-- Animator merging per outfit plus a master toggle, including a mode that preserves AAS auto-generated layers.
-- Automatic remapping of external references in the cloned bake and post-merge Magica Cloth data rebuild.
+> **Recommended:** Use this alongside [NDMF-Avatar-Optimizer](https://github.com/bdunderscore/ndmf-avatar-optimizer). NDMF Merge combines the avatars, and Avatar Optimizer cleans up the resulting hierarchy.
 
-## Requirements
-- Unity 2021.3+
-- ChilloutVR CCK installed in the project
-- [NDMF 1.4.1](https://github.com/bdunderscore/ndmf) (dependency)
-- [Chillaxins 1.1.0+](https://docs.hai-vr.dev/docs/products/chillaxins) (VPM dependency)
+## ✨ Key Features
 
-## Installation
-1. Add the package via VPM (recommended) or by copying the `packages/NDMF-Merge` folder into your Unity project.
-2. Ensure NDMF is present in the project and the CCK assemblies are available so reflection-based CVR lookups can succeed.
-3. (Optional) Install NDMF-Avatar-Optimizer if you want an optimized bake after merging.
+*   **Non-Destructive Workflow:** Your source assets remain untouched. All merging happens on a temporary clone during the build process.
+*   **Universal Reference Remapper (v2):** Uses a deep reflection-based sweep to find scripts referencing the *old* outfit objects and automatically points them to the *new* merged avatar. This fixes broken scripts and missing references on custom components.
+*   **Smart Bone Merging:**
+    *   **Merge:** Snaps outfit bones to the avatar's armature.
+    *   **Constraint Mode:** Can resolve bone conflicts by creating a **ParentConstraint** with zero offset. Great for outfits that don't perfectly align with the base armature but need to follow it.
+    *   **Rename/Unique:** Keeps bones separate if they shouldn't merge.
+*   **Intelligent Animator Merging:**
+    *   Merges Animator Controllers from outfits.
+    *   **Auto-detects Write Defaults:** Scans your base avatar's controller to enforce consistent Write Defaults settings on merged layers.
+    *   Splits **Animator Drivers** automatically if they exceed the 16-parameter limit.
+*   **Full CVR Component Support:**
+    *   Merges **Advanced Avatar Settings (AAS)**, creating a unified menu.
+    *   Merges **Parameter Streams** and **Pointer/Trigger** components.
+    *   Regenerates the AAS Animator Controller at the end of the build to ensure all animations allow for toggling.
+*   **Physics Support:**
+    *   Supports Dynamic Bones.
+    *   **Magica Cloth Integration:** Automatically triggers a data rebuild for `MagicaRenderDeformer`, `VirtualDeformer`, `BoneCloth`, and `MeshCloth` after merging to prevent "exploding" mesh issues.
 
-## Typical workflow
-1. **Add component:** Add **CVR Merge Armature** to your avatar GameObject that already has a `CVRAvatar` component.
-2. **Configure outfits:** In **Outfits to Merge**, add each outfit or armature prefab you want to combine. Optionally set prefixes/suffixes and animator options per outfit.
-3. **Detect bone conflicts:** Press **Detect Conflicts in All Outfits** to scan bones actually used by meshes and review the per-bone resolutions. Adjust resolutions or clear entries as needed.
-4. **Tune settings:** Use **Advanced Settings** to exclude transforms, pick component merging options, and decide which CVR features/animators should be merged.
-5. **Bake trigger:** The merge runs when NDMF processes the avatar (Play Mode, Bundle/Upload, or **Manual Bake**). NDMF clones the avatar, applies the merge to the clone, and destroys the temporary merger component in the output.
-6. **Review & publish:** Inspect the baked clone, verify Magica/DynamicBone data, then proceed with upload or further optimization.
+---
 
-## Component properties
-### Outfits to Merge
-Each entry represents one outfit or accessory armature to be merged. All options are per-outfit:
-- **Outfit:** GameObject root of the outfit/armature to merge.
-- **Prefix / Suffix:** Strings to strip from bone names while matching them to the target armature.
-- **Unique Bone Prefix:** Applied to bones that do not exist on the target armature so they remain namespaced.
-- **Mesh Prefix:** Prepended to all mesh GameObject names for clarity after merge.
-- **Merge Animator (skip AAS auto-layers):** Merge this outfit’s AnimatorController, omitting AAS auto-generated layers so only authored layers come across.
-- **Merge Animator (include AAS auto-layers):** Merge the AnimatorController including AAS auto-generated layers for one-to-one parity with the outfit prefab.
+## 📦 Requirements
 
-### Bone Conflict Resolution
-- **Default Bone Conflict Resolution:** Fallback choice for newly detected conflicts (Still Merge, Rename, Don’t Merge).
-- **Conflict Threshold:** World-space transform difference threshold used to decide when two bones are considered conflicting.
-- **Bone Conflicts list:** Populated by **Detect Conflicts in All Outfits**; shows per-bone position/rotation/scale deltas with individual resolution pickers and bulk “All: …” buttons.
+*   Unity 2021.3+
+*   **ChilloutVR CCK** (Imported in the project)
+*   **[NDMF](https://github.com/bdunderscore/ndmf) 1.4.1+**
+*   **[Chillaxins](https://docs.hai-vr.dev/docs/products/chillaxins) 1.1.0+** (Required for the plugin to load via VPM)
+*   *(Optional)* **Magica Cloth** (If merging cloth components)
 
-### Exclusions
-- **Excluded Transforms:** Specific transforms that are left untouched during merge operations.
-- **Excluded Name Patterns:** Wildcard patterns (`*` and `?`) that skip matching transforms whose names fit the pattern.
+---
 
-### Component Merging Options
-- **Lock Parent Scale:** Force parent scale to 1 to prevent outfit scaling artifacts.
-- **Merge DynamicBones:** Copy DynamicBone components from outfits.
-- **Merge Magica Cloth:** Copy Magica Cloth components from outfits and trigger a data rebuild after merging.
+## 🚀 Setup Guide
 
-### CVR Component Merging
-- **Merge Advanced Avatar Settings:** Merge AAS entries from outfit avatars into the target avatar. When enabled:
-  - **Generate AAS Controller At End:** Runs CVR “Create Controller” after all merges to regenerate the animator with merged entries.
-  - **Advanced Settings Prefix:** Optional prefix applied to merged AAS entries to avoid naming conflicts.
-- **Merge Advanced Pointer/Trigger:** Copy CVR advanced pointer/trigger components.
-- **Merge Parameter Stream:** Combine Parameter Stream entries across avatars.
-- **Merge Animator Driver:** Merge Animator Drivers with automatic split handling to keep within parameter limits.
+### 1. Installation
+Add the package via the Package Manager or copy the `NDMF-Merge` folder into your project's `Packages/` directory.
 
-### Animator Merging (Master)
-- **Merge Animator:** Global guard. If disabled, no outfit animators merge regardless of per-outfit toggles.
+### 2. Prepare the Scene
+1.  Place your **Base Avatar** in the scene.
+2.  Place your **Outfit Prefabs** in the scene keeping them separate ensures they don't get uploaded twice if you forget to remove them.
+3.  **Disable the Outfit GameObjects** if you don't want them visible by default, OR leave them enabled if you want them to be part of the base mesh. *NDMF Merge will handle the instantiation.*
 
-### Broken Animator References (debugging)
-A readonly list showing any detected animator references that could not be automatically remapped.
+### 3. Add the Component
+Select your **Base Avatar** (the object with the `CVRAvatar` component).
+Click **Add Component** -> search for **CVR Merge Armature**.
 
-## What happens during the bake
-When NDMF runs, the plugin performs these steps:
-1. **Discover mergers:** Finds all `CVRMergeArmature` components under the avatar root.
-2. **Clone outfits:** Each configured outfit is instantiated under the avatar clone so originals stay untouched.
-3. **Merge bones and meshes:** Bones are matched using the configured prefixes/suffixes; excluded transforms are skipped; conflicts respect your chosen resolutions.
-4. **Merge components:** DynamicBone, Magica Cloth (if enabled), CVR systems (AAS, Parameter Stream, Animator Driver, advanced pointers/triggers) and per-outfit animator controllers are merged according to toggles. A master animator toggle gates all per-outfit animator merges.
-5. **Animator handling:** Animator merges occur in the Transforming phase so merged controllers can be used for later steps. If AAS merge is enabled, the optional **Generate AAS Controller At End** pass rebuilds the final controller after all merges.
-6. **Reference remap:** A universal sweep walks all serialized and reflected object references in the clone, remapping any links that pointed outside the avatar to their new equivalents (or nulling when no match exists).
-7. **Magica rebuild:** After remapping, Magica Cloth components are rebuilt via their `BuildManager` to regenerate internal data.
-8. **Cleanup:** Temporary merged outfit clones are destroyed and the `CVRMergeArmature` component is removed from the baked output.
+### 4. Configure Outfits
+In the `CVR Merge Armature` inspector:
+1.  Click **+** under the **Outfits to Merge** list.
+2.  Drag your Outfit Prefab into the **Outfit** slot.
+3.  *(Optional)* Set the **Mesh Prefix** (e.g., `Hoodie_`) to easily identify meshes in the final build.
+4.  *(Important)* Configure **Prefix/Suffix** stripping (see below).
 
-## Magica Cloth 1 interference
-Mesh edits and bone modifications can disrupt Magica Cloth 1 or other components that rely on original mesh data. The plugin attempts to rebuild Magica data automatically, but the detection/guard logic is not fully reliable. If cloth behaves incorrectly, manually rebuild cloth mesh data after processing. For Magica Cloth 1 setups, prefer **Manual Bake** instead of automatic Play/Bundle triggers and review the results before publishing.
+### 5. Detect and Resolve Conflicts
+1.  Click the **Detect Conflicts in All Outfits** button.
+2.  The tool will scan for bones that exist in both the Base Avatar and the Outfit.
+3.  Scroll down to **Bone Conflicts**. You will see a list of matching bones.
+4.  **Review Resolutions:**
+    *   **Still Merge (Default):** The outfit bone is deleted, and its children/weights are moved to the Base Avatar's bone.
+    *   **Constraint To Target:** The outfit bone is kept, moved to the root, and **Parent Constrained** to the base bone. Use this if the merge causes deformation because the bones aren't in the exact same spot.
+    *   **Rename / Don't Merge:** Keeps the bone entirely separate.
 
-## Using with NDMF-Avatar-Optimizer
-NDMF-Avatar-Optimizer is recommended after merging to slim the baked avatar. Run it on the merged clone produced by NDMF Merge so it can clean up the final hierarchy and assets.
+### 6. Bake
+Simply upload your avatar to test. NDMF runs automatically, or Try using **Manual Bake** in NDMF settings to inspect the result before upload (recommended for magica cloth setups)
 
-## Tips for reliable results
-- Keep outfit prefabs untouched; re-run NDMF Merge after changes instead of editing the baked output.
-- Use name prefixes on unique bones/meshes to avoid ambiguity when multiple outfits add similar hierarchies.
-- Detect and resolve bone conflicts early, especially when outfits include their own armature edits.
-- When merging animators, decide whether AAS auto-layers should be kept or skipped per outfit.
-- If you rely on external scene references, ensure they exist under the avatar before baking so the remapper can resolve them.
+---
+
+## ⚙️ Detailed Configuration
+
+### Outfit Settings
+For each entry in the "Outfits to Merge" list:
+
+| Setting | Description |
+| :--- | :--- |
+| **Outfit** | The GameObject (prefab) of the clothes/props you want to add. |
+| **Prefix / Suffix** | Text to *remove* from the outfit's bone names so they match the Base Avatar. <br>*(Ex: If outfit has `Hoodie_Hips`, set Prefix to `Hoodie_` so it matches `Hips`)*. |
+| **Unique Bone Prefix** | Text to *add* to bones that **don't** find a match. This prevents naming collisions for non-humanoid bones. |
+| **Mesh Prefix** | Added to the name of every mesh object from this outfit. Helps organize the hierarchy. |
+| **Merge Animator** | If checked, merges the outfit's Animator Controller layers and parameters into the main avatar. |
+| **Include AAS Auto-Layers** | If unchecked, skips layers auto-generated by CCK (prevents duplicates). |
+
+### Global Settings
+
+*   **Merge Advanced Avatar Settings:**
+    *   Merges menus and toggles.
+    *   **Generate AAS Controller At End:** (Highly Recommended) Forces the plugin to regenerate the main Animator Controller *after* all merging is done. This ensures that toggles for merged items work correctly.
+    *   **Advanced Settings Prefix:** Adds a prefix to merged parameter names to avoid collisions (e.g., merging two outfits that both use a parameter named "Toggle").
+
+*   **Component Merging:**
+    *   **Lock Parent Scale:** Forces parent scales to (1,1,1) to prevent distortion when parenting outfit bones.
+    *   **Merge Dynamic Bones / Magica Cloth:** Moves these components to the new hierarchy. *Note: Magica Cloth data is auto-rebuilt during this process.*
+    *   **Merge Animator Driver:** Merges drivers. If a driver has >16 parameters, it splits it into multiple components to satisfy CCK limits.
+
+*   **Exclusions:**
+    *   **Excluded Transforms:** Specific objects to ignore during the merge.
+    *   **Excluded Name Patterns:** Use wildcards (e.g., `*Constraint*`) to skip objects based on name.
+
+---
+
+## 🔧 Troubleshooting & Tips
+
+**1. "My clothes are exploding!" (Magica Cloth)**
+The plugin attempts to rebuild Magica Cloth data automatically. However, if the mesh order changes significantly, Magica can get confused.
+*   **Fix:** Ensure **Merge Magica Cloth** is enabled.
+*   **Fix:** Try using **Manual Bake** in NDMF settings to inspect the result before upload.
+
+**2. "My animations aren't working."**
+*   Check **Generate AAS Controller At End**.
+*   Ensure **Merge Animator** is checked on the specific outfit.
+*   If the outfit uses Write Defaults OFF but your avatar uses ON, the plugin attempts to match the Avatar's setting. Check the Console logs for "Write Defaults" warnings.
+
+**3. "Bones are stretching weirdly."**
+This happens when the outfit's armature doesn't align perfectly with the base armature.
+*   **Fix:** In the **Bone Conflicts** list, find the problematic bone (e.g., `Hips` or `Spine`) and change the resolution to **Constraint To Target**. This keeps the outfit's original bone position but forces it to follow the avatar.
+
+**4. External References**
+If you have a script on the Avatar referencing a Game Object inside the Outfit prefab, the **Universal Remapper** will attempt to find the *merged* version of that object and update the reference. If it fails, the reference will be null.
+*   **Tip:** Ensure the object names match or are unique enough to be resolved.
 
 ## License
-MIT. See [LICENSE.txt](LICENSE.txt).
+MIT License. See [LICENSE.txt](LICENSE.txt).
