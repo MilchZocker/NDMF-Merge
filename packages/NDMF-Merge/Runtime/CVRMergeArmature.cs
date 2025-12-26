@@ -171,7 +171,7 @@ namespace NDMFMerge.Runtime
         public bool mergeMagicaCloth = true;
 
         [Header("CVR Component Merging")]
-        public bool mergeAdvancedAvatarSetup = false;
+        public bool mergeAdvancedAvatarSetup = true;
         public bool generateAASControllerAtEnd = true;
         public string advancedSettingsPrefix = "";
         public bool mergeAdvancedPointerTrigger = true;
@@ -194,11 +194,11 @@ namespace NDMFMerge.Runtime
         public List<BoneNameMapping> globalBoneNameMappings = new List<BoneNameMapping>();
 
         [Tooltip("Enable Levenshtein fuzzy match if no mapping and no exact match.")]
-        public bool enableLevenshteinBoneMatching = true;
+        public bool enableLevenshteinBoneMatching = false;
 
         [Tooltip("Maximum Levenshtein distance allowed for fuzzy matching.")]
         [Range(1, 10)]
-        public int maxLevenshteinDistance = 3;
+        public int maxLevenshteinDistance = 1;
 
         [Header("Animator Merging (Global Improvements)")]
         [Tooltip("Rewrite AnimationClip binding paths to match the merged hierarchy.")]
