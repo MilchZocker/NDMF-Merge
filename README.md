@@ -60,7 +60,16 @@ It allows you to keep your project clean by keeping outfits as separate prefabs.
 ## 🚀 Setup Guide
 
 ### 1. Installation
-Add the package via the Package Manager or copy the `NDMF-Merge` folder into your project's `Packages/` directory.
+
+**Option A: Via Unity Package Manager (Git URL)**
+1. Open Unity Package Manager (Window → Package Manager)
+2. Click the **+** button in the top-left corner
+3. Select **Add package from git URL...**
+4. Enter: `https://github.com/MilchZocker/NDMF-Merge.git#upm`
+5. Click **Add**
+
+**Option B: Manual Installation**
+Copy the `NDMF-Merge` folder into your project's `Packages/` directory.
 
 ### 2. Prepare the Scene
 1.  Place your **Base Avatar** in the scene.
