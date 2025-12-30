@@ -10,23 +10,38 @@ namespace NDMFMerge.Editor
     [CustomEditor(typeof(CVRMergeArmature))]
     public class CVRMergeArmatureEditor : UnityEditor.Editor
     {
+        // Main section foldouts
         private bool showBoneConflicts = false;
         private bool showAdvancedSettings = false;
         private bool showPreviewStats = false;
         private bool showGlobalBoneMatching = false;
         private bool showAnimatorImprovements = false;
+        private bool showGlobalDefaults = false;
+        
+        // Tools & Validation section foldouts
+        private bool showMeshUVTools = false;
+        private bool showBlendShapeTools = false;
+        private bool showBoneChainValidation = false;
+        private bool showPrePostValidation = false;
         
         // Preview detail foldouts
         private bool showPerOutfitDetails = false;
         private bool showComponentDetails = false;
         private bool showAnimatorDetails = false;
+        private bool showAllTools = false;
 
         private Vector2 conflictScrollPos;
         private Vector2 previewScrollPos;
+        private Vector2 hierarchyScrollPos;
+        private int hierarchyMaxLinesPerOutfit = 400;
 
         // Cache for statistics to prevent lag
         private MergeStatistics cachedStats;
         private bool statsNeedUpdate = true;
+
+        // UI state
+        private Dictionary<int, bool> generationTargetFoldouts = new Dictionary<int, bool>();
+        private Dictionary<int, bool> outfitHierarchyFoldouts = new Dictionary<int, bool>();
 
         // Color scheme
         private static readonly Color headerColor = new Color(0.8f, 0.9f, 1f, 0.3f);
@@ -45,31 +60,58 @@ namespace NDMFMerge.Editor
                 EditorGUILayout.Space(3);
             }
 
-            // --- Main Outfits List ---
-            DrawSectionHeader("Outfits to Merge");
+            // SECTION 1: Core Configuration
+            DrawSectionHeader("🎯 Core Configuration");
             DrawOutfitsList(merger);
 
-            EditorGUILayout.Space(8);
+            EditorGUILayout.Space(10);
 
-            // --- Global Settings ---
-            DrawSectionHeader("Global Settings");
+            // SECTION 2: Global Defaults & Matching
+            DrawSectionHeader("🌐 Global Settings");
+            EditorGUILayout.Space(2);
+            DrawGlobalOutfitDefaultsSection();
+            EditorGUILayout.Space(3);
             DrawGlobalBoneMatchingSection();
-            EditorGUILayout.Space(5);
+            EditorGUILayout.Space(3);
             DrawAnimatorImprovementsSection();
 
-            EditorGUILayout.Space(8);
+            EditorGUILayout.Space(10);
 
-            // --- Conflict Detection ---
-            DrawSectionHeader("Bone Conflict Detection");
+            // SECTION 3: Conflict Resolution
+            DrawSectionHeader("⚠️ Conflict Detection & Resolution");
+            EditorGUILayout.Space(2);
             DrawBoneConflictsSection(merger);
 
-            EditorGUILayout.Space(8);
+            EditorGUILayout.Space(10);
 
-            // --- Advanced & Preview ---
-            DrawAdvancedSettings(merger);
-            EditorGUILayout.Space(5);
+            // SECTION 4: Advanced Tools
+            DrawSectionHeader("🔧 Advanced Tools");
+            EditorGUILayout.Space(2);
+            DrawToolsAndValidationSections();
+
+            EditorGUILayout.Space(10);
+
+            // SECTION 5: Presets & Workflow
+            DrawSectionHeader("💾 Presets & Templates");
+            EditorGUILayout.Space(2);
+            DrawPresetSystemSection(merger);
+
+            EditorGUILayout.Space(10);
+
+            // SECTION 6: Preview & Analysis
+            DrawSectionHeader("📊 Preview & Analysis");
+            EditorGUILayout.Space(2);
             DrawPreviewInfo(merger);
+            EditorGUILayout.Space(3);
+            DrawHierarchyComparison(merger);
 
+            EditorGUILayout.Space(10);
+
+            // SECTION 7: Advanced Settings
+            DrawSectionHeader("⚙️ Advanced Settings");
+            EditorGUILayout.Space(2);
+            DrawAdvancedSettings(merger);
+            
             EditorGUILayout.Space(5);
             
             if (serializedObject.ApplyModifiedProperties())
@@ -80,14 +122,23 @@ namespace NDMFMerge.Editor
 
         private void DrawSectionHeader(string title)
         {
-            GUILayout.Space(2);
+            EditorGUILayout.Space(5);
+            
             var originalColor = GUI.backgroundColor;
             GUI.backgroundColor = headerColor;
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             GUI.backgroundColor = originalColor;
             
-            GUILayout.Label(title, EditorStyles.boldLabel);
+            var style = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 13,
+                alignment = TextAnchor.MiddleLeft
+            };
+            
+            GUILayout.Label(title, style);
             EditorGUILayout.EndVertical();
+            
+            EditorGUILayout.Space(2);
         }
 
         private void DrawOutfitsList(CVRMergeArmature merger)
@@ -148,8 +199,20 @@ namespace NDMFMerge.Editor
 
                     EditorGUILayout.Space(8);
                     DrawSubsectionLabel("Mesh Fixes");
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("boundsFixMode"), new GUIContent("Bounds Fix Mode"));
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("syncAnchorOverrides"), new GUIContent("Sync Probe Anchors"));
+                    var boundsProp = element.FindPropertyRelative("boundsFixMode");
+                    EditorGUILayout.PropertyField(boundsProp, new GUIContent("Bounds Fix Mode"));
+                    if (boundsProp.enumValueIndex == (int)NDMFMerge.Runtime.BoundsFixMode.CopyFromSelected)
+                    {
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("referenceBodyMesh"), new GUIContent("Reference Body Mesh"));
+                    }
+                    
+                    var probeModeProp = element.FindPropertyRelative("probeAnchorSyncMode");
+                    EditorGUILayout.PropertyField(probeModeProp, new GUIContent("Probe Anchor Sync"));
+                    if (probeModeProp.enumValueIndex == (int)NDMFMerge.Runtime.ProbeAnchorSyncMode.CopyFromSelected)
+                    {
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("referenceProbeAnchorMesh"), new GUIContent("Reference Probe Mesh"));
+                    }
+                    
                     EditorGUILayout.PropertyField(element.FindPropertyRelative("forceScaleToOne"), new GUIContent("Force Scale (1,1,1)"));
                     EditorGUILayout.PropertyField(element.FindPropertyRelative("removeUnusedBones"), new GUIContent("Remove Unused Bones"));
 
@@ -184,12 +247,45 @@ namespace NDMFMerge.Editor
 
         private void DrawSubsectionLabel(string label)
         {
+            EditorGUILayout.Space(2);
             var style = new GUIStyle(EditorStyles.label)
             {
                 fontStyle = FontStyle.Bold,
                 fontSize = 11
             };
             EditorGUILayout.LabelField(label, style);
+            EditorGUILayout.Space(1);
+        }
+
+        private void DrawCompactSubsectionLabel(string label)
+        {
+            EditorGUILayout.Space(2);
+            var style = new GUIStyle(EditorStyles.label)
+            {
+                fontStyle = FontStyle.Bold,
+                fontSize = 10
+            };
+            EditorGUILayout.LabelField(label, style);
+        }
+
+        private void DrawToolSubsection(ref bool foldout, string label, System.Action drawContent)
+        {
+            var originalColor = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.98f, 0.98f, 1f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = originalColor;
+
+            foldout = EditorGUILayout.Foldout(foldout, label, true);
+            if (foldout)
+            {
+                EditorGUILayout.Space(2);
+                EditorGUI.indentLevel++;
+                drawContent?.Invoke();
+                EditorGUI.indentLevel--;
+                EditorGUILayout.Space(2);
+            }
+
+            EditorGUILayout.EndVertical();
         }
 
         private void DrawGlobalBoneMatchingSection()
@@ -205,15 +301,27 @@ namespace NDMFMerge.Editor
             {
                 EditorGUILayout.Space(3);
                 EditorGUI.indentLevel++;
+                
+                // Basic Matching
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("enableFuzzyBoneMatching"), new GUIContent("Enable Fuzzy Matching"));
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("globalBoneNameMappings"), new GUIContent("Global Bone Maps"), true);
 
                 EditorGUILayout.Space(5);
+                
+                // Levenshtein Distance
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("enableLevenshteinBoneMatching"), new GUIContent("Levenshtein Distance Match"));
                 if (serializedObject.FindProperty("enableLevenshteinBoneMatching").boolValue)
                 {
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("maxLevenshteinDistance"), new GUIContent("Max Distance"));
                 }
+                
+                EditorGUILayout.Space(5);
+                
+                // Semantic Bone Matching
+                EditorGUILayout.LabelField("Semantic Matching", EditorStyles.boldLabel);
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("semanticBoneMatchingSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("semanticBoneMatchingSettings"), new GUIContent("Semantic Settings"), true);
+                
                 EditorGUI.indentLevel--;
                 EditorGUILayout.Space(2);
             }
@@ -244,6 +352,119 @@ namespace NDMFMerge.Editor
             }
 
             EditorGUILayout.EndVertical();
+        }
+
+        private void DrawGlobalOutfitDefaultsSection()
+        {
+            var merger = (CVRMergeArmature)target;
+            var originalColor = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.95f, 1f, 0.95f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = originalColor;
+
+            showGlobalDefaults = EditorGUILayout.Foldout(showGlobalDefaults, "🌐 Global Outfit Defaults", true, EditorStyles.foldoutHeader);
+            
+            if (showGlobalDefaults)
+            {
+                EditorGUILayout.Space(3);
+                EditorGUI.indentLevel++;
+                
+                EditorGUILayout.HelpBox("Changes to these settings will be applied to all outfits. You can then customize individual outfits as needed.", MessageType.Info);
+                EditorGUILayout.Space(3);
+                
+                EditorGUI.BeginChangeCheck();
+                
+                DrawSubsectionLabel("Bone Name Processing");
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("globalBonePrefix"), new GUIContent("Bone Prefix to Strip", "Apply this prefix to all outfits. Removes this prefix from outfit bone names during matching."));
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("globalBoneSuffix"), new GUIContent("Bone Suffix to Strip", "Apply this suffix to all outfits. Removes this suffix from outfit bone names during matching."));
+                
+                EditorGUILayout.Space(5);
+                DrawSubsectionLabel("Mesh Fixes");
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("globalBoundsFixMode"), new GUIContent("Bounds Fix Mode", "Apply this bounds fix mode to all outfits."));
+                if (merger.globalBoundsFixMode == BoundsFixMode.CopyFromSelected)
+                {
+                    EditorGUI.indentLevel++;
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("globalReferenceBodyMesh"), new GUIContent("Reference Body Mesh", "Global reference mesh for bounds when using CopyFromSelected mode."));
+                    EditorGUI.indentLevel--;
+                }
+                
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("globalProbeAnchorSyncMode"), new GUIContent("Probe Anchor Sync", "Apply this probe anchor sync mode to all outfits."));
+                if (merger.globalProbeAnchorSyncMode == ProbeAnchorSyncMode.CopyFromSelected)
+                {
+                    EditorGUI.indentLevel++;
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("globalReferenceProbeAnchorMesh"), new GUIContent("Reference Probe Mesh", "Global reference mesh for probe anchor when using CopyFromSelected mode."));
+                    EditorGUI.indentLevel--;
+                }
+                
+                EditorGUILayout.Space(5);
+                DrawSubsectionLabel("Outfit Processing");
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("globalForceScaleToOne"), new GUIContent("Force Scale (1,1,1)", "Apply this setting to all outfits: force outfit root scale to (1,1,1) before merging."));
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("globalRemoveUnusedBones"), new GUIContent("Remove Unused Bones", "Apply this setting to all outfits: remove bones with no vertex weights and no children after merge."));
+                
+                EditorGUILayout.Space(5);
+                DrawSubsectionLabel("Animator Merging");
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("globalMergeAnimator"), new GUIContent("Merge Animator (Basic)", "Apply this setting to all outfits: merge outfit animators (skips AAS layers)."));
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("globalMergeAnimatorIncludingAAS"), new GUIContent("Merge Animator (+AAS)", "Apply this setting to all outfits: merge outfit animators including AAS autogenerated layers."));
+                
+                if (EditorGUI.EndChangeCheck())
+                {
+                    // Apply global changes to all outfits
+                    Undo.RecordObject(merger, "Apply Global Outfit Defaults");
+                    ApplyGlobalDefaultsToOutfits(merger);
+                    statsNeedUpdate = true;
+                    EditorUtility.SetDirty(merger);
+                }
+                
+                EditorGUILayout.Space(3);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Apply to All Outfits Now", GUILayout.Height(24), GUILayout.Width(180)))
+                {
+                    Undo.RecordObject(merger, "Apply Global Defaults to All Outfits");
+                    ApplyGlobalDefaultsToOutfits(merger);
+                    statsNeedUpdate = true;
+                    EditorUtility.SetDirty(merger);
+                }
+                GUILayout.FlexibleSpace();
+                EditorGUILayout.EndHorizontal();
+                
+                EditorGUI.indentLevel--;
+                EditorGUILayout.Space(2);
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private void ApplyGlobalDefaultsToOutfits(CVRMergeArmature merger)
+        {
+            foreach (var outfit in merger.outfitsToMerge)
+            {
+                if (outfit == null) continue;
+                
+                // Apply string settings (only if global is set)
+                if (!string.IsNullOrEmpty(merger.globalBonePrefix))
+                    outfit.prefix = merger.globalBonePrefix;
+                if (!string.IsNullOrEmpty(merger.globalBoneSuffix))
+                    outfit.suffix = merger.globalBoneSuffix;
+                
+                // Apply enum settings
+                outfit.boundsFixMode = merger.globalBoundsFixMode;
+                outfit.probeAnchorSyncMode = merger.globalProbeAnchorSyncMode;
+                
+                // Apply reference mesh settings
+                if (merger.globalReferenceBodyMesh != null)
+                    outfit.referenceBodyMesh = merger.globalReferenceBodyMesh;
+                if (merger.globalReferenceProbeAnchorMesh != null)
+                    outfit.referenceProbeAnchorMesh = merger.globalReferenceProbeAnchorMesh;
+                
+                // Apply bool settings
+                outfit.forceScaleToOne = merger.globalForceScaleToOne;
+                outfit.removeUnusedBones = merger.globalRemoveUnusedBones;
+                outfit.mergeAnimator = merger.globalMergeAnimator;
+                outfit.mergeAnimatorIncludingAAS = merger.globalMergeAnimatorIncludingAAS;
+            }
+            
+            Debug.Log($"[CVR Merge] Applied global defaults to {merger.outfitsToMerge.Count} outfits.");
         }
 
         private void DrawBoneConflictsSection(CVRMergeArmature merger)
@@ -429,12 +650,18 @@ namespace NDMFMerge.Editor
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             GUI.backgroundColor = originalColor;
 
-            showAdvancedSettings = EditorGUILayout.Foldout(showAdvancedSettings, "⚙ Advanced Settings", true, EditorStyles.foldoutHeader);
+            showAdvancedSettings = EditorGUILayout.Foldout(showAdvancedSettings, "⚙ Settings", true, EditorStyles.foldoutHeader);
             
             if (showAdvancedSettings)
             {
                 EditorGUILayout.Space(3);
                 EditorGUI.indentLevel++;
+
+                // Debug & Logging Section
+                DrawSubsectionLabel("Debug & Logging");
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("verboseLogging"), new GUIContent("Enable Verbose Logging", "Enable detailed logging for all merge operations."));
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("logLevel"), new GUIContent("Log Level", "0=Errors Only, 1=Warnings+Errors, 2=All Details"));
+                EditorGUILayout.Space(8);
 
                 DrawSubsectionLabel("Exclusions");
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("excludedTransforms"), new GUIContent("Excluded Transforms"), true);
@@ -487,7 +714,7 @@ namespace NDMFMerge.Editor
             GUI.backgroundColor = originalColor;
 
             EditorGUILayout.BeginHorizontal();
-            showPreviewStats = EditorGUILayout.Foldout(showPreviewStats, "📊 Merge Preview & Statistics", true, EditorStyles.foldoutHeader);
+            showPreviewStats = EditorGUILayout.Foldout(showPreviewStats, "📊 Preview", true, EditorStyles.foldoutHeader);
             
             if (showPreviewStats && GUILayout.Button("🔄", GUILayout.Width(30), GUILayout.Height(18)))
             {
@@ -1250,6 +1477,215 @@ namespace NDMFMerge.Editor
             EditorGUILayout.EndVertical();
         }
 
+        // --- Blend Shape Settings ---
+        private void DrawBlendShapeSettings(CVRMergeArmature merger)
+        {
+            var settings = merger.blendShapeTransferSettings;
+            if (settings == null) return;
+
+            EditorGUILayout.LabelField("Weight Transfer (Copy Values)", EditorStyles.boldLabel);
+            EditorGUI.indentLevel++;
+            settings.enableWeightTransfer = EditorGUILayout.Toggle("Enable Weight Transfer", settings.enableWeightTransfer);
+            if (settings.enableWeightTransfer)
+            {
+                settings.weightTransferDirection = (BlendShapeTransferDirection)EditorGUILayout.EnumPopup("Direction", settings.weightTransferDirection);
+                settings.matchByName = EditorGUILayout.Toggle("Match by Name", settings.matchByName);
+                settings.minWeightThreshold = EditorGUILayout.Slider("Min Weight Threshold", settings.minWeightThreshold, 0f, 1f);
+                settings.useSmartWeightTransfer = EditorGUILayout.Toggle("Use Smart Weight Transfer", settings.useSmartWeightTransfer);
+            }
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.Space(10);
+
+            EditorGUILayout.LabelField("Blend Shape Generation (Create Frames)", EditorStyles.boldLabel);
+            EditorGUI.indentLevel++;
+
+            // Draw generation tasks list
+            if (settings.generationTasks == null)
+                settings.generationTasks = new List<BlendShapeGenerationTask>();
+
+            EditorGUILayout.LabelField($"Generation Tasks ({settings.generationTasks.Count})", EditorStyles.label);
+            
+            for (int i = 0; i < settings.generationTasks.Count; i++)
+            {
+                DrawGenerationTask(merger, settings.generationTasks[i], i);
+            }
+
+            EditorGUILayout.Space(5);
+            if (GUILayout.Button("+ Add Generation Task", GUILayout.Height(24)))
+            {
+                settings.generationTasks.Add(new BlendShapeGenerationTask());
+            }
+
+            if (settings.generationTasks.Count > 0 && GUILayout.Button("- Remove Last Task", GUILayout.Height(24)))
+            {
+                settings.generationTasks.RemoveAt(settings.generationTasks.Count - 1);
+            }
+
+            EditorGUI.indentLevel--;
+        }
+
+        private void DrawGenerationTask(CVRMergeArmature merger, BlendShapeGenerationTask task, int taskIndex)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            
+            EditorGUILayout.LabelField($"Task {taskIndex + 1}", EditorStyles.boldLabel);
+            EditorGUI.indentLevel++;
+
+            task.enabled = EditorGUILayout.Toggle("Enabled", task.enabled);
+            task.sourceGenerationMesh = EditorGUILayout.ObjectField("Source Mesh", task.sourceGenerationMesh, typeof(SkinnedMeshRenderer), true) as SkinnedMeshRenderer;
+            
+            EditorGUILayout.Space(5);
+            task.blendShapeNamesToGenerate = EditorGUILayout.TextField("Blend Shapes (comma-separated)", task.blendShapeNamesToGenerate);
+            EditorGUILayout.HelpBox("Leave empty to generate all blend shapes from source mesh.", MessageType.Info);
+
+            EditorGUILayout.Space(5);
+            // Single foldout list for generation targets
+            if (!generationTargetFoldouts.TryGetValue(taskIndex, out bool fold)) fold = true;
+            fold = EditorGUILayout.Foldout(fold, "Generation Targets", true, EditorStyles.foldoutHeader);
+            generationTargetFoldouts[taskIndex] = fold;
+            if (fold)
+            {
+                EditorGUI.indentLevel++;
+                DrawOutfitSelection(merger, task);
+                EditorGUI.indentLevel--;
+            }
+
+            EditorGUILayout.Space(5);
+            task.transferMode = (BlendShapeTransferMode)EditorGUILayout.EnumPopup("Transfer Mode", task.transferMode);
+            task.maxMappingDistance = EditorGUILayout.Slider("Max Mapping Distance", task.maxMappingDistance, 0f, 0.1f);
+            task.useSmartFrameGeneration = EditorGUILayout.Toggle("Use Smart Frame Generation", task.useSmartFrameGeneration);
+            task.overrideExisting = EditorGUILayout.Toggle("Override Existing", task.overrideExisting);
+
+            EditorGUI.indentLevel--;
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawOutfitSelection(CVRMergeArmature merger, BlendShapeGenerationTask task)
+        {
+            EditorGUILayout.LabelField("Select Targets:", EditorStyles.label);
+            
+            // Add "Base Avatar" as a special entry
+            if (task.targetOutfitNames == null) task.targetOutfitNames = new List<string>();
+            bool hasBase = task.targetOutfitNames.Contains("Base Avatar");
+            bool newHasBase = EditorGUILayout.Toggle("Base Avatar", hasBase);
+            if (newHasBase && !hasBase)
+                task.targetOutfitNames.Add("Base Avatar");
+            else if (!newHasBase && hasBase)
+                task.targetOutfitNames.Remove("Base Avatar");
+
+            // Add outfit selections
+            if (merger.outfitsToMerge != null)
+            {
+                for (int i = 0; i < merger.outfitsToMerge.Count; i++)
+                {
+                    var outfit = merger.outfitsToMerge[i];
+                    if (outfit == null || outfit.outfit == null) continue;
+
+                    string outfitName = outfit.outfit.name;
+                    bool isSelected = task.targetOutfitNames.Contains(outfitName);
+                    bool newIsSelected = EditorGUILayout.Toggle(outfitName, isSelected);
+
+                    if (newIsSelected && !isSelected)
+                        task.targetOutfitNames.Add(outfitName);
+                    else if (!newIsSelected && isSelected)
+                        task.targetOutfitNames.Remove(outfitName);
+                }
+            }
+
+            if (merger.outfitsToMerge == null || merger.outfitsToMerge.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No outfits defined in the outfits list.", MessageType.Info);
+            }
+        }
+
+        // --- Tools & Validation Foldouts ---
+        private void DrawToolsAndValidationSections()
+        {
+            var originalColor = GUI.backgroundColor;
+
+            GUI.backgroundColor = new Color(0.95f, 0.95f, 1f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = originalColor;
+
+            bool anyToolsOpen = showMeshUVTools || showBlendShapeTools || showBoneChainValidation || showPrePostValidation;
+            showAllTools = EditorGUILayout.Foldout(
+                showAllTools || anyToolsOpen,
+                "🔧 Mesh, UV & Validation Tools",
+                true,
+                EditorStyles.foldoutHeader);
+
+            if (showAllTools)
+            {
+                EditorGUILayout.Space(3);
+                EditorGUI.indentLevel++;
+
+                DrawToolSubsection(ref showMeshUVTools, "🎨 Mesh & Material Tools", () =>
+                {
+                    // Single verbose logging for UV + Material Consolidation
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("uvValidationSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
+                    EditorGUILayout.Space(2);
+
+                    DrawSubsectionLabel("UV Validation");
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("uvValidationSettings.fillMissingUVs"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("uvValidationSettings.autoFixOverlapping"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("uvValidationSettings.autoFixInverted"));
+
+                    EditorGUILayout.Space(2);
+
+                    DrawSubsectionLabel("Material Consolidation");
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("materialConsolidationSettings.consolidateByShaderAndTexture"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("materialConsolidationSettings.reuseExistingMaterials"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("materialConsolidationSettings.mergeDuplicateMaterials"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("materialConsolidationSettings.consolidateMaterials"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("materialConsolidationSettings.matchByName"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("materialConsolidationSettings.matchByShader"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("materialConsolidationSettings.nameSimilarityThreshold"));
+                });
+
+                EditorGUILayout.Space(3);
+
+                DrawToolSubsection(ref showBlendShapeTools, "😊 BlendShape Transfer", () =>
+                {
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("blendShapeTransferSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
+                    DrawBlendShapeSettings((CVRMergeArmature)target);
+                });
+
+                EditorGUILayout.Space(3);
+
+                DrawToolSubsection(ref showBoneChainValidation, "🔗 Bone Chain Validation", () =>
+                {
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("boneChainValidationSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
+                    EditorGUILayout.Space(2);
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("boneChainValidationSettings.enable"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("boneChainValidationSettings.warnOnMissing"));
+                });
+
+                EditorGUILayout.Space(3);
+
+                DrawToolSubsection(ref showPrePostValidation, "✅ Pre/Post Merge Validation", () =>
+                {
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("preMergeValidationSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
+                    EditorGUILayout.Space(2);
+
+                    DrawSubsectionLabel("Pre-Merge Validation");
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("preMergeValidationSettings.checkMissingBones"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("preMergeValidationSettings.checkMeshIntegrity"));
+
+                    EditorGUILayout.Space(2);
+
+                    DrawSubsectionLabel("Post-Merge Verification");
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("postMergeVerificationSettings.checkBounds"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("postMergeVerificationSettings.checkProbes"));
+                });
+
+                EditorGUI.indentLevel--;
+                EditorGUILayout.Space(2);
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
         // =================================================================================
         // CONFLICT DETECTION LOGIC
         // =================================================================================
@@ -1368,6 +1804,551 @@ namespace NDMFMerge.Editor
                 if (r != null) return r;
             }
             return null;
+        }
+
+        private void DrawHierarchyComparison(CVRMergeArmature merger)
+        {
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("showHierarchyComparison"), new GUIContent("Show Hierarchy Comparison"));
+            
+            if (!merger.showHierarchyComparison)
+            {
+                EditorGUILayout.HelpBox("Enable to preview how bones will be matched and merged based on current settings.", MessageType.Info);
+                return;
+            }
+            
+            var targetCVRAvatar = merger.GetCVRAvatar();
+            if (targetCVRAvatar == null)
+            {
+                EditorGUILayout.HelpBox("No CVRAvatar found. Cannot display hierarchy comparison.", MessageType.Warning);
+                return;
+            }
+            
+            var targetArmature = FindArmatureFromCVRAvatar(targetCVRAvatar);
+            if (targetArmature == null)
+            {
+                EditorGUILayout.HelpBox("No armature found on avatar. Cannot display hierarchy comparison.", MessageType.Warning);
+                return;
+            }
+            
+            EditorGUILayout.Space(3);
+            EditorGUILayout.LabelField("Current Merge Settings:", EditorStyles.boldLabel);
+            
+            var originalColor = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.95f, 0.95f, 1f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = originalColor;
+            
+            EditorGUILayout.LabelField("• Enable Fuzzy Matching: " + (merger.enableFuzzyBoneMatching ? "✓" : "✗"));
+            EditorGUILayout.LabelField("  Global Bone Maps: " + (merger.enableFuzzyBoneMatching ? (merger.globalBoneNameMappings?.Count ?? 0).ToString() : "disabled"), EditorStyles.miniLabel);
+            EditorGUILayout.LabelField("• Enable Levenshtein: " + (merger.enableLevenshteinBoneMatching ? "✓" : "✗"));
+            if (merger.enableLevenshteinBoneMatching)
+                EditorGUILayout.LabelField("  Max Distance: " + merger.maxLevenshteinDistance, EditorStyles.miniLabel);
+
+            EditorGUILayout.LabelField("• Semantic Matching: " + (merger.semanticBoneMatchingSettings?.enable == true ? "✓" : "✗"));
+            if (merger.semanticBoneMatchingSettings?.enable == true)
+            {
+                EditorGUILayout.LabelField("  Synonyms: " + (merger.semanticBoneMatchingSettings.synonyms?.Count ?? 0), EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("  Patterns: " + (merger.semanticBoneMatchingSettings.patterns?.Count ?? 0), EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("  Case Insensitive: " + (merger.semanticBoneMatchingSettings.caseInsensitive ? "✓" : "✗"), EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("  L/R Variations: " + (merger.semanticBoneMatchingSettings.enableLRVariations ? "✓" : "✗"), EditorStyles.miniLabel);
+            }
+            
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(5);
+            
+            // Display each outfit's hierarchy comparison
+            if (merger.outfitsToMerge == null || merger.outfitsToMerge.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No outfits added yet. Add outfits above to see hierarchy comparison.", MessageType.Info);
+                return;
+            }
+            
+            hierarchyScrollPos = EditorGUILayout.BeginScrollView(hierarchyScrollPos, GUILayout.MaxHeight(450));
+
+            hierarchyMaxLinesPerOutfit = EditorGUILayout.IntSlider("Max Lines Per Outfit", hierarchyMaxLinesPerOutfit, 50, 2000);
+            EditorGUILayout.Space(4);
+            
+            for (int i = 0; i < merger.outfitsToMerge.Count; i++)
+            {
+                var outfit = merger.outfitsToMerge[i];
+                if (outfit.outfit == null) continue;
+                
+                GUI.backgroundColor = new Color(0.9f, 1f, 0.95f);
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                GUI.backgroundColor = originalColor;
+                
+                EditorGUILayout.LabelField("Outfit: " + outfit.outfit.name, EditorStyles.boldLabel);
+                
+                if (!string.IsNullOrEmpty(outfit.prefix))
+                    EditorGUILayout.LabelField("  Prefix: '" + outfit.prefix + "'", EditorStyles.miniLabel);
+                if (!string.IsNullOrEmpty(outfit.suffix))
+                    EditorGUILayout.LabelField("  Suffix: '" + outfit.suffix + "'", EditorStyles.miniLabel);
+                if (!string.IsNullOrEmpty(outfit.uniqueBonePrefix))
+                    EditorGUILayout.LabelField("  Unique Bone Prefix: '" + outfit.uniqueBonePrefix + "'", EditorStyles.miniLabel);
+                
+                EditorGUILayout.Space(3);
+                if (!outfitHierarchyFoldouts.TryGetValue(i, out bool showTree)) showTree = false;
+                showTree = EditorGUILayout.Foldout(showTree, "Hierarchy Preview", true);
+                outfitHierarchyFoldouts[i] = showTree;
+                if (!showTree)
+                {
+                    EditorGUILayout.EndVertical();
+                    EditorGUILayout.Space(3);
+                    continue;
+                }
+                
+                var outfitArmature = outfit.outfit.transform.Find("Armature");
+                if (outfitArmature == null)
+                {
+                    EditorGUILayout.HelpBox("No 'Armature' found in outfit.", MessageType.Warning);
+                    EditorGUILayout.EndVertical();
+                    continue;
+                }
+                
+                // Get bones used by meshes
+                var usedBones = GetBonesUsedByMeshes(outfitArmature);
+                
+                // Build bone mapping preview with reasons and final names
+                var boneMatches = new Dictionary<Transform, Transform>();
+                var boneMatchReason = new Dictionary<Transform, string>();
+                var boneFinalName = new Dictionary<Transform, string>();
+                var uniqueBones = new List<Transform>();
+
+                // Align preview with runtime merge: global maps + semantic synonyms + per-outfit maps (later overrides earlier)
+                var combinedMappings = new Dictionary<string, (string to, string reason)>();
+                if (merger.enableFuzzyBoneMatching && merger.globalBoneNameMappings != null)
+                {
+                    foreach (var mapping in merger.globalBoneNameMappings)
+                    {
+                        if (!string.IsNullOrEmpty(mapping.from) && !string.IsNullOrEmpty(mapping.to))
+                            combinedMappings[mapping.from] = (mapping.to, "global map");
+                    }
+                }
+                if (merger.semanticBoneMatchingSettings?.enable == true && merger.semanticBoneMatchingSettings.synonyms != null)
+                {
+                    foreach (var syn in merger.semanticBoneMatchingSettings.synonyms)
+                    {
+                        if (!string.IsNullOrEmpty(syn.from) && !string.IsNullOrEmpty(syn.to))
+                            combinedMappings[syn.from] = (syn.to, "semantic synonym");
+                    }
+                }
+                if (outfit.boneNameMappings != null)
+                {
+                    foreach (var mapping in outfit.boneNameMappings)
+                    {
+                        if (!string.IsNullOrEmpty(mapping.from) && !string.IsNullOrEmpty(mapping.to))
+                            combinedMappings[mapping.from] = (mapping.to, "outfit map");
+                    }
+                }
+                
+                foreach (var outfitBone in usedBones)
+                {
+                    var originalName = outfitBone.name;
+                    var boneName = originalName;
+
+                    if (!string.IsNullOrEmpty(outfit.uniqueBonePrefix) && boneName.StartsWith(outfit.uniqueBonePrefix))
+                    {
+                        uniqueBones.Add(outfitBone);
+                        boneFinalName[outfitBone] = boneName;
+                        continue;
+                    }
+                    
+                    // Apply prefix/suffix stripping
+                    if (!string.IsNullOrEmpty(outfit.prefix) && boneName.StartsWith(outfit.prefix))
+                        boneName = boneName.Substring(outfit.prefix.Length);
+                    if (!string.IsNullOrEmpty(outfit.suffix) && boneName.EndsWith(outfit.suffix))
+                        boneName = boneName.Substring(0, boneName.Length - outfit.suffix.Length);
+                    
+                    string reason = null;
+
+                    // Apply combined mappings (runtime order: global -> semantic synonyms -> per-outfit override)
+                    if (combinedMappings.TryGetValue(boneName, out var mapped))
+                    {
+                        boneName = mapped.to;
+                        reason = mapped.reason;
+                    }
+
+                    // Try to find matching bone in target
+                    var targetBone = FindBoneByName(targetArmature, boneName);
+                    if (targetBone != null && reason == null) reason = "exact";
+                    
+                    // Try Levenshtein fuzzy matching (only when enabled in runtime)
+                    if (targetBone == null && merger.enableFuzzyBoneMatching && merger.enableLevenshteinBoneMatching)
+                    {
+                        targetBone = TryLevenshteinMatch(targetArmature, boneName, merger.maxLevenshteinDistance);
+                        if (targetBone != null) reason = "levenshtein";
+                    }
+
+                    // Try semantic matching (patterns + L/R variations)
+                    if (targetBone == null && merger.semanticBoneMatchingSettings?.enable == true)
+                    {
+                        targetBone = TrySemanticMatch(targetArmature, boneName, merger.semanticBoneMatchingSettings, out var semanticReason);
+                        if (targetBone != null) reason = semanticReason ?? "semantic";
+                    }
+                    
+                    if (targetBone != null)
+                    {
+                        boneMatches[outfitBone] = targetBone;
+                        boneMatchReason[outfitBone] = reason ?? "exact";
+                        boneFinalName[outfitBone] = targetBone.name;
+                    }
+                    else
+                    {
+                        uniqueBones.Add(outfitBone);
+                        var newName = string.IsNullOrEmpty(outfit.uniqueBonePrefix) ? originalName : outfit.uniqueBonePrefix + originalName;
+                        boneFinalName[outfitBone] = newName;
+                    }
+                }
+                
+                // Show raw hierarchies side-by-side
+                EditorGUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField("Avatar Armature", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("Outfit Armature", EditorStyles.boldLabel);
+                EditorGUILayout.EndHorizontal();
+
+                var reverseMatches = new Dictionary<Transform, List<Transform>>();
+                foreach (var kvp in boneMatches)
+                {
+                    if (!reverseMatches.TryGetValue(kvp.Value, out var list))
+                    {
+                        list = new List<Transform>();
+                        reverseMatches[kvp.Value] = list;
+                    }
+                    list.Add(kvp.Key);
+                }
+
+                var uniqueSet = new HashSet<Transform>(uniqueBones);
+
+                EditorGUILayout.BeginHorizontal();
+                using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+                {
+                    DrawHierarchyTree(targetArmature, t =>
+                    {
+                        reverseMatches.TryGetValue(t, out var incoming);
+                        var info = incoming != null && incoming.Count > 0 ? $" (matches: {incoming.Count})" : string.Empty;
+                        return t.name + info;
+                    }, hierarchyMaxLinesPerOutfit);
+                }
+
+                using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+                {
+                    DrawHierarchyTree(outfitArmature, t =>
+                    {
+                        if (boneMatches.TryGetValue(t, out var match))
+                        {
+                            var reason = boneMatchReason.TryGetValue(t, out var r) ? r : "match";
+                            var finalName = boneFinalName.TryGetValue(t, out var fn) ? fn : match.name;
+                            return $"{t.name}  ✓ → {finalName} ({reason})";
+                        }
+                        if (uniqueSet.Contains(t))
+                        {
+                            var finalName = boneFinalName.TryGetValue(t, out var fn) ? fn : t.name;
+                            return $"{t.name}  ⚠ unique → {finalName}";
+                        }
+                        return t.name;
+                    }, hierarchyMaxLinesPerOutfit);
+                }
+                EditorGUILayout.EndHorizontal();
+
+                // Display matched bones
+                if (boneMatches.Count > 0)
+                {
+                    GUI.backgroundColor = new Color(0.8f, 1f, 0.8f);
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                    GUI.backgroundColor = originalColor;
+                    
+                    EditorGUILayout.LabelField("✓ Matched Bones (" + boneMatches.Count + "):", EditorStyles.boldLabel);
+                    foreach (var kvp in boneMatches.Take(20))
+                    {
+                        EditorGUILayout.BeginHorizontal();
+                        EditorGUILayout.LabelField(kvp.Key.name, GUILayout.Width(150));
+                        EditorGUILayout.LabelField("→", GUILayout.Width(20));
+                        EditorGUILayout.LabelField(kvp.Value.name, EditorStyles.miniLabel);
+                        EditorGUILayout.EndHorizontal();
+                    }
+                    if (boneMatches.Count > 20)
+                        EditorGUILayout.LabelField("... and " + (boneMatches.Count - 20) + " more", EditorStyles.miniLabel);
+                    
+                    EditorGUILayout.EndVertical();
+                }
+                
+                // Display unique bones
+                if (uniqueBones.Count > 0)
+                {
+                    EditorGUILayout.Space(2);
+                    GUI.backgroundColor = new Color(1f, 1f, 0.8f);
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                    GUI.backgroundColor = originalColor;
+                    
+                    EditorGUILayout.LabelField("⚠ Unique Bones (" + uniqueBones.Count + "):", EditorStyles.boldLabel);
+                    if (!string.IsNullOrEmpty(outfit.uniqueBonePrefix))
+                        EditorGUILayout.LabelField("Will be prefixed with: '" + outfit.uniqueBonePrefix + "'", EditorStyles.miniLabel);
+                    
+                    foreach (var bone in uniqueBones.Take(15))
+                    {
+                        var newName = string.IsNullOrEmpty(outfit.uniqueBonePrefix) ? bone.name : outfit.uniqueBonePrefix + bone.name;
+                        EditorGUILayout.BeginHorizontal();
+                        EditorGUILayout.LabelField(bone.name, GUILayout.Width(150));
+                        EditorGUILayout.LabelField("→ ", GUILayout.Width(20));
+                        EditorGUILayout.LabelField(newName, EditorStyles.miniLabel);
+                        EditorGUILayout.EndHorizontal();
+                    }
+                    if (uniqueBones.Count > 15)
+                        EditorGUILayout.LabelField("... and " + (uniqueBones.Count - 15) + " more", EditorStyles.miniLabel);
+                    
+                    EditorGUILayout.EndVertical();
+                }
+                
+                EditorGUILayout.EndVertical();
+                EditorGUILayout.Space(3);
+            }
+            
+            EditorGUILayout.EndScrollView();
+        }
+        
+        private Transform TrySemanticMatch(Transform root, string boneName, SemanticBoneMatchingSettings settings, out string reason)
+        {
+            reason = null;
+            if (settings == null) return null;
+            
+            // Try synonyms first
+            if (settings.synonyms != null)
+            {
+                foreach (var syn in settings.synonyms)
+                {
+                    if (string.Equals(syn.from, boneName, settings.caseInsensitive ? System.StringComparison.OrdinalIgnoreCase : System.StringComparison.Ordinal))
+                    {
+                        var match = FindBoneByName(root, syn.to);
+                        if (match != null)
+                        {
+                            reason = "semantic synonym";
+                            return match;
+                        }
+                    }
+                }
+            }
+            
+            // Try generic patterns
+            if (settings.patterns != null && settings.patterns.Count > 0 && MatchesAnyPattern(boneName, settings.patterns, settings.caseInsensitive))
+            {
+                var match = FindBoneByPatterns(root, settings.patterns, settings.caseInsensitive);
+                if (match != null)
+                {
+                    reason = "semantic pattern";
+                    return match;
+                }
+            }
+            
+            // Left/Right variations
+            if (settings.enableLRVariations)
+            {
+                bool isLeft = MatchesAnyPattern(boneName, settings.leftPatterns, settings.caseInsensitive);
+                bool isRight = MatchesAnyPattern(boneName, settings.rightPatterns, settings.caseInsensitive);
+
+                if (isLeft)
+                {
+                    var match = FindBoneByPatterns(root, settings.leftPatterns, settings.caseInsensitive);
+                    if (match != null)
+                    {
+                        reason = "semantic L/R";
+                        return match;
+                    }
+                }
+                else if (isRight)
+                {
+                    var match = FindBoneByPatterns(root, settings.rightPatterns, settings.caseInsensitive);
+                    if (match != null)
+                    {
+                        reason = "semantic L/R";
+                        return match;
+                    }
+                }
+            }
+            
+            return null;
+        }
+
+        private bool MatchesPatternName(string name, string pattern, bool caseInsensitive)
+        {
+            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(pattern)) return false;
+            var n = caseInsensitive ? name.ToLowerInvariant() : name;
+            var p = caseInsensitive ? pattern.ToLowerInvariant() : pattern;
+
+            string regex = "^" + System.Text.RegularExpressions.Regex.Escape(p)
+                .Replace("\\*", ".*")
+                .Replace("\\?", ".") + "$";
+            try
+            {
+                return System.Text.RegularExpressions.Regex.IsMatch(n, regex);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool MatchesAnyPattern(string name, List<string> patterns, bool caseInsensitive)
+        {
+            if (patterns == null) return false;
+            foreach (var pattern in patterns)
+            {
+                if (MatchesPatternName(name, pattern, caseInsensitive)) return true;
+            }
+            return false;
+        }
+
+        private Transform FindBoneByPatterns(Transform root, List<string> patterns, bool caseInsensitive)
+        {
+            Transform found = null;
+            void Search(Transform t)
+            {
+                if (found != null) return;
+                if (MatchesAnyPattern(t.name, patterns, caseInsensitive))
+                {
+                    found = t;
+                    return;
+                }
+                foreach (Transform child in t) Search(child);
+            }
+            Search(root);
+            return found;
+        }
+        
+        private Transform TryLevenshteinMatch(Transform root, string boneName, int threshold)
+        {
+            Transform bestMatch = null;
+            int bestDistance = int.MaxValue;
+            
+            SearchForBestMatch(root, boneName, threshold, ref bestMatch, ref bestDistance);
+            
+            return bestMatch;
+        }
+
+        private void DrawHierarchyTree(Transform root, System.Func<Transform, string> lineBuilder, int maxLines)
+        {
+            if (root == null) return;
+
+            int shown = 0;
+            void Recurse(Transform t, int depth)
+            {
+                if (shown >= maxLines) return;
+                shown++;
+
+                string indent = new string(' ', depth * 2);
+                EditorGUILayout.LabelField(indent + lineBuilder(t), EditorStyles.miniLabel);
+
+                foreach (Transform child in t)
+                {
+                    Recurse(child, depth + 1);
+                    if (shown >= maxLines) break;
+                }
+            }
+
+            Recurse(root, 0);
+
+            if (shown >= maxLines)
+            {
+                EditorGUILayout.LabelField("… truncated (" + maxLines + "+ nodes)", EditorStyles.miniLabel);
+            }
+        }
+        
+        private void SearchForBestMatch(Transform current, string targetName, int threshold, ref Transform bestMatch, ref int bestDistance)
+        {
+            int distance = ComputeLevenshteinDistance(current.name, targetName);
+            
+            if (distance <= threshold && distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestMatch = current;
+            }
+            
+            foreach (Transform child in current)
+            {
+                SearchForBestMatch(child, targetName, threshold, ref bestMatch, ref bestDistance);
+            }
+        }
+        
+        private int ComputeLevenshteinDistance(string s, string t)
+        {
+            int n = s.Length;
+            int m = t.Length;
+            int[,] d = new int[n + 1, m + 1];
+            
+            if (n == 0) return m;
+            if (m == 0) return n;
+            
+            for (int i = 0; i <= n; i++) d[i, 0] = i;
+            for (int j = 0; j <= m; j++) d[0, j] = j;
+            
+            for (int i = 1; i <= n; i++)
+            {
+                for (int j = 1; j <= m; j++)
+                {
+                    int cost = (t[j - 1] == s[i - 1]) ? 0 : 1;
+                    d[i, j] = System.Math.Min(System.Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+                }
+            }
+            
+            return d[n, m];
+        }
+
+        private void DrawPresetSystemSection(CVRMergeArmature merger)
+        {
+            var originalColor = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.9f, 1f, 0.95f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = originalColor;
+            
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Saved Presets", EditorStyles.boldLabel);
+            
+            GUI.backgroundColor = new Color(0.7f, 1f, 0.7f);
+            if (GUILayout.Button("💾 Save Current as Preset", GUILayout.Height(22)))
+            {
+                string name = EditorUtility.SaveFilePanelInProject("Save Preset", "MergePreset", "asset", "Save merge preset");
+                if (!string.IsNullOrEmpty(name))
+                {
+                    merger.SavePreset(System.IO.Path.GetFileNameWithoutExtension(name), "Custom preset", "General");
+                    EditorUtility.SetDirty(merger);
+                }
+            }
+            GUI.backgroundColor = originalColor;
+            EditorGUILayout.EndHorizontal();
+            
+            if (merger.savedPresets.Count > 0)
+            {
+                EditorGUILayout.Space(3);
+                for (int i = 0; i < merger.savedPresets.Count; i++)
+                {
+                    var preset = merger.savedPresets[i];
+                    EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+                    EditorGUILayout.LabelField(preset.presetName, GUILayout.Width(150));
+                    EditorGUILayout.LabelField(preset.outfitType, EditorStyles.miniLabel, GUILayout.Width(80));
+                    
+                    if (GUILayout.Button("Load", GUILayout.Width(50)))
+                    {
+                        merger.LoadPreset(preset);
+                        EditorUtility.SetDirty(merger);
+                    }
+                    
+                    GUI.backgroundColor = new Color(1f, 0.5f, 0.5f);
+                    if (GUILayout.Button("×", GUILayout.Width(25)))
+                    {
+                        merger.DeletePreset(preset);
+                        EditorUtility.SetDirty(merger);
+                        break;
+                    }
+                    GUI.backgroundColor = originalColor;
+                    EditorGUILayout.EndHorizontal();
+                }
+            }
+            else
+            {
+                EditorGUILayout.HelpBox("No presets saved yet.", MessageType.Info);
+            }
+            
+            EditorGUILayout.EndVertical();
         }
     }
 }
