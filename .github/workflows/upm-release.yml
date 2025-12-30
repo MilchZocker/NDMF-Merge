@@ -1,0 +1,25 @@
+name: Update-UPM-Branch
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: tag
+        run: echo "name=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create UPM Branch
+        uses: hecomi/create-upm-branch-action@main
+        with:
+          git-tag: ${{ steps.tag.outputs.name }}
+          pkg-root-dir-path: packages/NDMF-Merge
+          root-files: README.md LICENSE.txt
