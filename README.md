@@ -4,7 +4,7 @@
 
 It allows you to keep your project clean by keeping outfits as separate prefabs. When you upload or enter Play Mode, the tool clones your avatar, grafts the outfits, handles bone merging, rebuilds physics, and generates the necessary controllers—all without touching your source files.
 
-> **Recommended:** Use this alongside [NDMF-Avatar-Optimizer](https://github.com/bdunderscore/ndmf-avatar-optimizer). NDMF Merge combines the avatars, and Avatar Optimizer cleans up the resulting hierarchy.
+> **Recommended:** Use this alongside [NDMF-Avatar-Optimizer](https://github.com/MilchZocker/NDMF-Avatar-Optimization). NDMF Merge combines the avatars, and Avatar Optimizer cleans up the resulting hierarchy.
 
 ## ✨ Key Features
 
