@@ -588,6 +588,7 @@ namespace NDMFMerge.Editor
         // ------------------------------------------------------------
         private void RebuildMagicaData(Transform avatarRoot, CVRMergeArmature merger)
         {
+#if CCK_ADDIN_MAGICACLOTHSUPPORT
             // SAFETY CHECK: avatarRoot should be the NDMF clone root, validated by caller
             var renderDeformers = avatarRoot.GetComponentsInChildren<MagicaRenderDeformer>(true).ToList();
             if (merger.verboseLogging || merger.logLevel >= 2)
@@ -628,6 +629,7 @@ namespace NDMFMerge.Editor
                 BuildManager.CreateComponent(mc);
                 EditorUtility.SetDirty(mc);
             }
+#endif
         }
 
         // ------------------------------------------------------------
