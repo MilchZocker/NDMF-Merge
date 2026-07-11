@@ -192,15 +192,21 @@ namespace NDMFMerge.Editor
             if (cvrAvatar == null) { mergeLog.AppendLine("ERROR: No CVRAvatar found on avatar!"); return; }
 
             Transform targetArmature = FindArmatureFromCVRAvatar(cvrAvatar);
-            if (targetArmature == null) { mergeLog.AppendLine("ERROR: Could not find armature in CVRAvatar!"); return; }
+            bool hasArmatureModeOutfits = merger.outfitsToMerge != null && merger.outfitsToMerge.Any(o => o != null && o.outfit != null && o.mergeMode == OutfitMergeMode.Armature);
+            if (targetArmature == null && hasArmatureModeOutfits)
+            {
+                mergeLog.AppendLine("ERROR: Could not find armature in CVRAvatar!");
+                return;
+            }
 
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (targetArmature != null && (merger.verboseLogging || merger.logLevel >= 2))
                 mergeLog.AppendLine($"Target armature: {targetArmature.name}");
 
             // Per-outfit bounds reference will be selected individually (CopyFromSelected)
             SkinnedMeshRenderer bodyReferenceMesh = null;
 
             var clonedOutfits = new List<Transform>();
+            var clonedOutfitByEntry = new Dictionary<OutfitToMerge, Transform>();
 
             foreach (var outfitEntry in merger.outfitsToMerge)
             {
@@ -229,8 +235,16 @@ namespace NDMFMerge.Editor
                     if (merger.verboseLogging || merger.logLevel >= 2)
                         mergeLog.AppendLine($"\n--- Merging outfit: {clonedOutfit.name} ---");
                     clonedOutfits.Add(clonedOutfit.transform);
+                    clonedOutfitByEntry[outfitEntry] = clonedOutfit.transform;
 
-                    MergeOutfitWithoutDestroy(ctx, merger, outfitEntry, clonedOutfit.transform, targetArmature, bodyReferenceMesh);
+                    if (outfitEntry.mergeMode == OutfitMergeMode.Object)
+                    {
+                        MergeOutfitAsObject(ctx, merger, outfitEntry, clonedOutfit.transform);
+                    }
+                    else
+                    {
+                        MergeOutfitWithoutDestroy(ctx, merger, outfitEntry, clonedOutfit.transform, targetArmature, bodyReferenceMesh, clonedOutfitByEntry);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -892,13 +906,30 @@ namespace NDMFMerge.Editor
             }
             
             var t = cvrAvatar.GetType();
-            var candidates = new[] { "actualAnimatorController", "actualAnimator", "generatedAnimatorController" };
+            var candidates = new[]
+            {
+                "actualAnimatorController",
+                "actualAnimator",
+                "generatedAnimatorController",
+                "generatedAnimator",
+                "actualController",
+                "baseAnimatorController",
+                "baseAnimator"
+            };
             foreach (var name in candidates)
             {
                 var f = t.GetField(name);
                 if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
                 {
                     f.SetValue(cvrAvatar, controller);
+                    EditorUtility.SetDirty(cvrAvatar);
+                    return;
+                }
+
+                var p = t.GetProperty(name);
+                if (p != null && p.CanWrite && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
+                {
+                    p.SetValue(cvrAvatar, controller);
                     EditorUtility.SetDirty(cvrAvatar);
                     return;
                 }
@@ -916,7 +947,91 @@ namespace NDMFMerge.Editor
         // ----------------------------
         // Outfit merge (Standard)
         // ----------------------------
-        private void MergeOutfitWithoutDestroy(BuildContext ctx, CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform outfitRoot, Transform targetArmature, SkinnedMeshRenderer bodyReferenceMesh)
+        private void MergeOutfitAsObject(BuildContext ctx, CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform outfitRoot)
+        {
+            if (ctx == null || outfitRoot == null || outfitEntry == null) return;
+
+            var objectSettings = outfitEntry.objectMergeSettings ?? new ObjectMergeSettings();
+            var targetParent = objectSettings.targetParent != null
+                ? ResolveTransformInCloneHierarchy(objectSettings.targetParent, ctx.AvatarRootTransform)
+                : ctx.AvatarRootTransform;
+
+            if (targetParent == null)
+            {
+                mergeLog.AppendLine($"  WARNING: Object mode target parent missing for {outfitRoot.name}, skipping.");
+                return;
+            }
+
+            var childrenToMove = new List<Transform>();
+            foreach (Transform child in outfitRoot)
+                childrenToMove.Add(child);
+
+            var placementMode = objectSettings.placementMode;
+            var targetBone = objectSettings.targetBone != null
+                ? ResolveTransformInCloneHierarchy(objectSettings.targetBone, ctx.AvatarRootTransform)
+                : null;
+            var referenceTransform = objectSettings.referenceTransform != null
+                ? ResolveTransformInCloneHierarchy(objectSettings.referenceTransform, ctx.AvatarRootTransform)
+                : null;
+
+            Quaternion valueRotation = Quaternion.Euler(objectSettings.localRotationOffset);
+
+            foreach (var child in childrenToMove)
+            {
+                switch (placementMode)
+                {
+                    case ObjectPlacementMode.PlaceUnderSelectedGameObject:
+                        child.SetParent(targetParent, true);
+                        break;
+
+                    case ObjectPlacementMode.WeightMeshesToTargetBoneAtCurrentPosition:
+                        child.SetParent(targetParent, true);
+                        if (targetBone != null)
+                            WeightMeshesToTargetBone(child, targetBone);
+                        break;
+
+                    case ObjectPlacementMode.PlaceUsingReference:
+                        child.SetParent(targetParent, true);
+                        if (referenceTransform != null)
+                        {
+                            child.position = referenceTransform.position;
+                            child.rotation = referenceTransform.rotation;
+                            child.localScale = referenceTransform.localScale;
+                        }
+                        break;
+
+                    case ObjectPlacementMode.PlaceUsingValues:
+                    default:
+                        child.SetParent(targetParent, false);
+                        child.localPosition = objectSettings.localPositionOffset;
+                        child.localRotation = valueRotation;
+                        child.localScale = objectSettings.localScaleOffset;
+                        break;
+                }
+            }
+
+            if (merger.verboseLogging || merger.logLevel >= 2)
+                mergeLog.AppendLine($"  Object mode merge complete: moved {childrenToMove.Count} object(s) to {targetParent.name}");
+        }
+
+        private void WeightMeshesToTargetBone(Transform root, Transform targetBone)
+        {
+            if (root == null || targetBone == null) return;
+
+            var smrs = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            foreach (var smr in smrs)
+            {
+                if (smr == null) continue;
+
+                smr.rootBone = targetBone;
+                if (smr.bones == null || smr.bones.Length == 0)
+                {
+                    smr.bones = new[] { targetBone };
+                }
+            }
+        }
+
+        private void MergeOutfitWithoutDestroy(BuildContext ctx, CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform outfitRoot, Transform targetArmature, SkinnedMeshRenderer bodyReferenceMesh, Dictionary<OutfitToMerge, Transform> clonedOutfitByEntry)
         {
             Transform outfitArmature = FindArmatureInOutfit(outfitRoot);
             if (outfitArmature == null)
@@ -1083,22 +1198,20 @@ namespace NDMFMerge.Editor
             if (merger.verboseLogging || merger.logLevel >= 2)
                 mergeLog.AppendLine($"  Outfit merge complete");
 
-            // Post-step: Blend shape transfer (weight copying)
-            if (merger.blendShapeTransferSettings != null && merger.blendShapeTransferSettings.enableWeightTransfer)
-            {
-                TransferBlendShapes(outfitRoot, targetArmature, merger.blendShapeTransferSettings, merger);
-            }
-
-            // Post-step: Blend shape generation (create new frames from specified source)
+            // Post-step: Blend shape task pipeline (task-scoped direction + options)
             if (merger.blendShapeTransferSettings != null)
             {
-                // Multi-task system
-                if (merger.blendShapeTransferSettings.generationTasks != null && merger.blendShapeTransferSettings.generationTasks.Count > 0)
+                merger.blendShapeTransferSettings.EnsureMigrated();
+                if (merger.blendShapeTransferSettings.tasks != null)
                 {
-                    foreach (var task in merger.blendShapeTransferSettings.generationTasks)
+                    foreach (var task in merger.blendShapeTransferSettings.tasks)
                     {
-                        if (!task.enabled) continue;
-                        GenerateBlendShapesFromTask(ctx.AvatarRootTransform, targetArmature, task, merger.outfitsToMerge, merger, merger.blendShapeTransferSettings);
+                        if (task == null || !task.enabled) continue;
+
+                        TransferBlendShapes(ctx.AvatarRootTransform, outfitRoot, targetArmature, task, merger.blendShapeTransferSettings, merger);
+
+                        if (task.enableGeneration)
+                            GenerateBlendShapesFromTask(ctx.AvatarRootTransform, targetArmature, task, clonedOutfitByEntry, merger.GetCVRAvatar(), merger, merger.blendShapeTransferSettings);
                     }
                 }
             }
@@ -3022,24 +3135,51 @@ namespace NDMFMerge.Editor
             return 1f - ((float)distance / maxLen);
         }
 
-        private void TransferBlendShapes(Transform outfitRoot, Transform targetArmature, BlendShapeTransferSettings settings, CVRMergeArmature merger)
+        private void TransferBlendShapes(Transform avatarRoot, Transform outfitRoot, Transform targetArmature, BlendShapeTransferTask task, BlendShapeTransferSettings settings, CVRMergeArmature merger)
         {
-            if (settings == null || outfitRoot == null || targetArmature == null) return;
+            if (settings == null || task == null || avatarRoot == null) return;
             
             // Weight Transfer (Copy current blend shape values)
-            if (!settings.enableWeightTransfer) return;
+            if (!task.enableWeightTransfer) return;
 
             bool verbose = merger.verboseLogging || settings.verboseLogging;
             if (verbose && merger.logLevel >= 2)
                 mergeLog.AppendLine("  [Blend Shape Transfer] Starting blend shape weight transfer...");
 
             int appliedWeights = 0;
+
+                if (task.direction == BlendShapeTransferDirection.MeshToMesh)
+                {
+                    var srcSMR = ResolveRendererInCloneHierarchy(task.weightTransferSourceMesh, avatarRoot);
+                    var dstSMR = ResolveRendererInCloneHierarchy(task.weightTransferTargetMesh, avatarRoot);
+
+                    if (srcSMR == null || dstSMR == null)
+                    {
+                        if (verbose && merger.logLevel >= 1)
+                            mergeLog.AppendLine("  [Blend Shape Transfer] Mesh -> Mesh skipped: source or target mesh was not resolved in clone hierarchy.");
+                        return;
+                    }
+
+                    var srcMesh = srcSMR.sharedMesh;
+                    var dstMesh = dstSMR.sharedMesh;
+                    if (srcMesh == null || dstMesh == null || srcMesh.blendShapeCount == 0 || dstMesh.blendShapeCount == 0) return;
+
+                    appliedWeights += TransferBlendShapeWeightsBetweenMeshes(srcSMR, srcMesh, dstSMR, dstMesh, task);
+
+                    if (verbose && merger.logLevel >= 2)
+                        mergeLog.AppendLine($"  [Blend Shape Transfer] Mesh -> Mesh complete: applied {appliedWeights} weight(s)");
+                    else if (appliedWeights > 0)
+                        mergeLog.AppendLine($"  Blend shape weight transfer (Mesh -> Mesh): applied {appliedWeights} weight(s)");
+                    return;
+                }
+
+                if (outfitRoot == null || targetArmature == null) return;
                 
                 // Determine transfer direction
-                bool outfitToBase = settings.weightTransferDirection == BlendShapeTransferDirection.OutfitToBase || 
-                                    settings.weightTransferDirection == BlendShapeTransferDirection.Bidirectional;
-                bool baseToOutfit = settings.weightTransferDirection == BlendShapeTransferDirection.BaseToOutfit || 
-                                    settings.weightTransferDirection == BlendShapeTransferDirection.Bidirectional;
+                bool outfitToBase = task.direction == BlendShapeTransferDirection.OutfitToBase || 
+                                    task.direction == BlendShapeTransferDirection.Bidirectional;
+                bool baseToOutfit = task.direction == BlendShapeTransferDirection.BaseToOutfit || 
+                                    task.direction == BlendShapeTransferDirection.Bidirectional;
 
                 // Outfit → Base transfer
                 if (outfitToBase)
@@ -3056,7 +3196,7 @@ namespace NDMFMerge.Editor
                         var dstMesh = dstSMR.sharedMesh;
                         if (dstMesh == null || dstMesh.blendShapeCount == 0) continue;
 
-                        appliedWeights += TransferBlendShapeWeightsBetweenMeshes(srcSMR, srcMesh, dstSMR, dstMesh, settings);
+                        appliedWeights += TransferBlendShapeWeightsBetweenMeshes(srcSMR, srcMesh, dstSMR, dstMesh, task);
                     }
                 }
 
@@ -3075,18 +3215,18 @@ namespace NDMFMerge.Editor
                         var dstMesh = dstSMR.sharedMesh;
                         if (dstMesh == null || dstMesh.blendShapeCount == 0) continue;
 
-                        appliedWeights += TransferBlendShapeWeightsBetweenMeshes(srcSMR, srcMesh, dstSMR, dstMesh, settings);
+                        appliedWeights += TransferBlendShapeWeightsBetweenMeshes(srcSMR, srcMesh, dstSMR, dstMesh, task);
                     }
                 }
 
                 if (verbose && merger.logLevel >= 2)
-                    mergeLog.AppendLine($"  [Blend Shape Transfer] Complete: applied {appliedWeights} weight(s) ({settings.weightTransferDirection})");
+                    mergeLog.AppendLine($"  [Blend Shape Transfer] Complete: applied {appliedWeights} weight(s) ({task.direction})");
                 else if (appliedWeights > 0)
-                    mergeLog.AppendLine($"  Blend shape weight transfer ({settings.weightTransferDirection}): applied {appliedWeights} weight(s)");
+                    mergeLog.AppendLine($"  Blend shape weight transfer ({task.direction}): applied {appliedWeights} weight(s)");
         }
 
         // Smart blend shape weight transfer with topology awareness
-        private int TransferBlendShapeWeightsBetweenMeshes(SkinnedMeshRenderer srcSMR, Mesh srcMesh, SkinnedMeshRenderer dstSMR, Mesh dstMesh, BlendShapeTransferSettings settings)
+        private int TransferBlendShapeWeightsBetweenMeshes(SkinnedMeshRenderer srcSMR, Mesh srcMesh, SkinnedMeshRenderer dstSMR, Mesh dstMesh, BlendShapeTransferTask task)
         {
             int appliedCount = 0;
 
@@ -3094,13 +3234,15 @@ namespace NDMFMerge.Editor
             for (int di = 0; di < dstMesh.blendShapeCount; di++)
             {
                 string dstName = dstMesh.GetBlendShapeName(di);
-                int si = FindBlendShapeIndexByName(srcMesh, dstName);
+                int si = task.matchByName
+                    ? FindBlendShapeIndexByName(srcMesh, dstName)
+                    : (di < srcMesh.blendShapeCount ? di : -1);
                 if (si < 0) continue;
 
                 float weight = srcSMR.GetBlendShapeWeight(si);
                 
                 // Apply smart weight transfer if enabled
-                if (settings.useSmartWeightTransfer)
+                if (task.useSmartWeightTransfer)
                 {
                     // Check if meshes have similar topology
                     float topologySimilarity = CalculateTopologySimilarity(srcMesh, dstMesh);
@@ -3120,7 +3262,7 @@ namespace NDMFMerge.Editor
                     }
                 }
                 
-                if (weight >= settings.minWeightThreshold)
+                if (weight >= task.minWeightThreshold)
                 {
                     dstSMR.SetBlendShapeWeight(di, weight);
                     appliedCount++;
@@ -3155,7 +3297,7 @@ namespace NDMFMerge.Editor
         }
 
         // [NEW FEATURE] Generate blend shapes from a task (new multi-task system)
-        private void GenerateBlendShapesFromTask(Transform avatarRoot, Transform targetArmature, BlendShapeGenerationTask task, List<OutfitToMerge> outfits, CVRMergeArmature merger, BlendShapeTransferSettings settings)
+        private void GenerateBlendShapesFromTask(Transform avatarRoot, Transform targetArmature, BlendShapeTransferTask task, Dictionary<OutfitToMerge, Transform> clonedOutfitByEntry, Component targetCVRAvatar, CVRMergeArmature merger, BlendShapeTransferSettings settings)
         {
             if (task == null || task.sourceGenerationMesh == null) return;
 
@@ -3163,7 +3305,14 @@ namespace NDMFMerge.Editor
             if (verbose && merger.logLevel >= 2)
                 mergeLog.AppendLine($"  [Blend Shape Generation] Starting generation task from source: {task.sourceGenerationMesh.name}");
 
-            var sourceMesh = task.sourceGenerationMesh.sharedMesh;
+            var sourceRenderer = ResolveRendererInCloneHierarchy(task.sourceGenerationMesh, avatarRoot);
+            if (sourceRenderer == null)
+            {
+                mergeLog.AppendLine("  Blend shape generation: source mesh was not resolved in clone hierarchy");
+                return;
+            }
+
+            var sourceMesh = sourceRenderer.sharedMesh;
             if (sourceMesh == null || sourceMesh.blendShapeCount == 0)
             {
                 mergeLog.AppendLine($"  Blend shape generation: source mesh has no blend shapes");
@@ -3187,11 +3336,37 @@ namespace NDMFMerge.Editor
 
             int totalGenerated = 0;
 
+            if (task.direction == BlendShapeTransferDirection.MeshToMesh)
+            {
+                var targetRenderer = ResolveRendererInCloneHierarchy(task.targetGenerationMesh, avatarRoot);
+                if (targetRenderer == null || targetRenderer.sharedMesh == null)
+                {
+                    mergeLog.AppendLine("  Blend shape generation: Mesh -> Mesh target was not resolved in clone hierarchy");
+                    return;
+                }
+
+                int generated = GenerateBlendShapesOnMesh(sourceRenderer, sourceMesh, targetRenderer, targetBlendShapeNames, task.maxMappingDistance, task.useSmartFrameGeneration, task.overrideExisting, task.transferMode);
+                if (generated > 0)
+                {
+                    totalGenerated += generated;
+                    mergeLog.AppendLine($"    Generated {generated} blend shape(s) on mesh target: {targetRenderer.name}");
+                    if (task.copyGeneratedBlendshapeAnimations)
+                        CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetRenderer, targetBlendShapeNames, merger, settings);
+                }
+
+                if (verbose && merger.logLevel >= 2)
+                    mergeLog.AppendLine($"  [Blend Shape Generation] Mesh -> Mesh complete: {totalGenerated} total frame(s) created");
+                else if (totalGenerated > 0)
+                    mergeLog.AppendLine($"  Blend shape generation complete: {totalGenerated} total frame(s) created");
+                return;
+            }
+
             // Build selected target names ("Base Avatar" + outfit names). Empty list => all outfits.
             var selectedNames = new HashSet<string>(task.targetOutfitNames ?? new List<string>());
+            bool applyToAllTargets = task.applyToAllTargets;
 
             // Generate on base body if selected
-            if (selectedNames.Contains("Base Avatar") && avatarRoot != null)
+            if ((applyToAllTargets || selectedNames.Contains("Base Avatar")) && avatarRoot != null)
             {
                 // FIX: Use avatarRoot instead of targetArmature to only affect the NDMF clone
                 var baseRenderers = avatarRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -3201,11 +3376,11 @@ namespace NDMFMerge.Editor
                     
                     // Skip if this renderer belongs to a cloned outfit (not base)
                     bool isOutfitRenderer = false;
-                    if (outfits != null)
+                    if (clonedOutfitByEntry != null)
                     {
-                        foreach (var outfit in outfits)
+                        foreach (var outfitClone in clonedOutfitByEntry.Values)
                         {
-                            if (outfit?.outfit != null && targetSMR.transform.IsChildOf(outfit.outfit.transform))
+                            if (outfitClone != null && targetSMR.transform.IsChildOf(outfitClone))
                             {
                                 isOutfitRenderer = true;
                                 break;
@@ -3215,35 +3390,40 @@ namespace NDMFMerge.Editor
                     
                     if (isOutfitRenderer) continue; // Skip outfit renderers when generating on base
                     
-                    int generated = GenerateBlendShapesOnMesh(task.sourceGenerationMesh, sourceMesh, targetSMR, targetBlendShapeNames, task.maxMappingDistance, task.useSmartFrameGeneration, task.overrideExisting);
+                    int generated = GenerateBlendShapesOnMesh(sourceRenderer, sourceMesh, targetSMR, targetBlendShapeNames, task.maxMappingDistance, task.useSmartFrameGeneration, task.overrideExisting, task.transferMode);
                     if (generated > 0)
                     {
                         totalGenerated += generated;
                         mergeLog.AppendLine($"    Generated {generated} blend shape(s) on base mesh: {targetSMR.name}");
+                        if (task.copyGeneratedBlendshapeAnimations)
+                            CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetSMR, targetBlendShapeNames, merger, settings);
                     }
                 }
             }
 
             // Generate on outfit meshes by name
-            if (outfits != null)
+            if (clonedOutfitByEntry != null)
             {
-                for (int i = 0; i < outfits.Count; i++)
+                foreach (var kvp in clonedOutfitByEntry)
                 {
-                    var outfit = outfits[i];
-                    if (outfit == null || outfit.outfit == null) continue;
+                    var outfitEntry = kvp.Key;
+                    var outfitClone = kvp.Value;
+                    if (outfitEntry == null || outfitEntry.outfit == null || outfitClone == null) continue;
 
                     // If specific names selected, skip non-selected outfits
-                    if (selectedNames.Count > 0 && !selectedNames.Contains(outfit.outfit.name)) continue;
+                    if (!applyToAllTargets && selectedNames.Count > 0 && !selectedNames.Contains(outfitEntry.outfit.name)) continue;
 
-                    var outfitRenderers = outfit.outfit.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+                    var outfitRenderers = outfitClone.GetComponentsInChildren<SkinnedMeshRenderer>(true);
                     foreach (var targetSMR in outfitRenderers)
                     {
                         if (targetSMR.sharedMesh == null) continue;
-                        int generated = GenerateBlendShapesOnMesh(task.sourceGenerationMesh, sourceMesh, targetSMR, targetBlendShapeNames, task.maxMappingDistance, task.useSmartFrameGeneration, task.overrideExisting);
+                        int generated = GenerateBlendShapesOnMesh(sourceRenderer, sourceMesh, targetSMR, targetBlendShapeNames, task.maxMappingDistance, task.useSmartFrameGeneration, task.overrideExisting, task.transferMode);
                         if (generated > 0)
                         {
                             totalGenerated += generated;
-                            mergeLog.AppendLine($"    Generated {generated} blend shape(s) on outfit '{outfit.outfit.name}' mesh: {targetSMR.name}");
+                            mergeLog.AppendLine($"    Generated {generated} blend shape(s) on outfit '{outfitEntry.outfit.name}' mesh: {targetSMR.name}");
+                            if (task.copyGeneratedBlendshapeAnimations)
+                                CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetSMR, targetBlendShapeNames, merger, settings);
 
                         }
                     }
@@ -3257,7 +3437,7 @@ namespace NDMFMerge.Editor
         }
 
         // Generate specific blend shapes from source mesh onto a target mesh
-        private int GenerateBlendShapesOnMesh(SkinnedMeshRenderer srcSMR, Mesh srcMesh, SkinnedMeshRenderer dstSMR, HashSet<string> blendShapeNames, float maxMappingDistance, bool useSmartFrameGeneration, bool overrideExisting)
+        private int GenerateBlendShapesOnMesh(SkinnedMeshRenderer srcSMR, Mesh srcMesh, SkinnedMeshRenderer dstSMR, HashSet<string> blendShapeNames, float maxMappingDistance, bool useSmartFrameGeneration, bool overrideExisting, BlendShapeTransferMode transferMode)
         {
             // === CRITICAL: Ensure we never modify the original asset mesh directly ===
             var dstMesh = EnsureSceneMeshInstance(dstSMR, "NDMF Generated");
@@ -3288,6 +3468,12 @@ namespace NDMFMerge.Editor
             var srcVerts = srcMesh.vertices;
             float cellSize = Mathf.Max(0.01f, maxMappingDistance / 2f);
             var spatialHash = BuildSpatialHash(srcVerts, cellSize);
+
+            var srcBounds = srcMesh.bounds;
+            var dstBounds = dstMesh.bounds;
+            Vector3[] srcVertsNormalized = null;
+            if (transferMode == BlendShapeTransferMode.TransferFramesBoundsNormalized)
+                srcVertsNormalized = NormalizeVerticesToBounds(srcVerts, srcBounds);
 
             int totalFramesProcessed = 0;
             int totalShapesProcessed = 0;
@@ -3332,6 +3518,9 @@ namespace NDMFMerge.Editor
 
                         // Build approximate deltas for destination mesh
                         var dstVerts = dstMesh.vertices;
+                        Vector3[] dstVertsNormalized = null;
+                        if (transferMode == BlendShapeTransferMode.TransferFramesBoundsNormalized)
+                            dstVertsNormalized = NormalizeVerticesToBounds(dstVerts, dstBounds);
                         var approxDeltaVertices = new Vector3[dstVerts.Length];
                         var approxDeltaNormals = new Vector3[dstVerts.Length];
                         var approxDeltaTangents = new Vector3[dstVerts.Length];
@@ -3342,18 +3531,65 @@ namespace NDMFMerge.Editor
                         for (int dvi = 0; dvi < dstVerts.Length; dvi++)
                         {
                             Vector3 dv = dstVerts[dvi];
-                            int nearestIdx = FindNearestVertexOptimized(dv, srcVerts, spatialHash, cellSize, maxDist);
-
-                            if (nearestIdx >= 0)
+                            if (transferMode == BlendShapeTransferMode.TransferFramesKNearestBlended)
                             {
-                                float nearestDist = Vector3.Distance(dv, srcVerts[nearestIdx]);
-                                // Apply smart weight scaling based on topology and distance
-                                float distanceWeight = 1f - (nearestDist / maxDist);
-                                float smartWeight = topologySimilarity * distanceWeight;
+                                var nearest = FindKNearestVerticesOptimized(dv, srcVerts, spatialHash, cellSize, maxDist, 3);
+                                if (nearest.Count > 0)
+                                {
+                                    float invDistSum = 0f;
+                                    for (int n = 0; n < nearest.Count; n++)
+                                        invDistSum += 1f / Mathf.Max(1e-6f, nearest[n].distance);
 
-                                approxDeltaVertices[dvi] = deltaVertices[nearestIdx] * smartWeight;
-                                approxDeltaNormals[dvi] = deltaNormals[nearestIdx] * smartWeight;
-                                approxDeltaTangents[dvi] = deltaTangents[nearestIdx] * smartWeight;
+                                    Vector3 v = Vector3.zero;
+                                    Vector3 nrm = Vector3.zero;
+                                    Vector3 tan = Vector3.zero;
+                                    float nearestDist = nearest[0].distance;
+
+                                    for (int n = 0; n < nearest.Count; n++)
+                                    {
+                                        float w = (1f / Mathf.Max(1e-6f, nearest[n].distance)) / Mathf.Max(1e-6f, invDistSum);
+                                        int srcIdx = nearest[n].index;
+                                        v += deltaVertices[srcIdx] * w;
+                                        nrm += deltaNormals[srcIdx] * w;
+                                        tan += deltaTangents[srcIdx] * w;
+                                        if (nearest[n].distance < nearestDist) nearestDist = nearest[n].distance;
+                                    }
+
+                                    float distanceWeight = 1f - (nearestDist / maxDist);
+                                    float smartWeight = topologySimilarity * distanceWeight;
+
+                                    approxDeltaVertices[dvi] = v * smartWeight;
+                                    approxDeltaNormals[dvi] = nrm * smartWeight;
+                                    approxDeltaTangents[dvi] = tan * smartWeight;
+                                }
+                            }
+                            else
+                            {
+                                int nearestIdx = -1;
+                                float nearestDist = maxDist;
+
+                                if (transferMode == BlendShapeTransferMode.TransferFramesBoundsNormalized && srcVertsNormalized != null && dstVertsNormalized != null)
+                                {
+                                    nearestIdx = FindNearestVertexLinear(dstVertsNormalized[dvi], srcVertsNormalized, maxDist);
+                                    if (nearestIdx >= 0)
+                                        nearestDist = Vector3.Distance(dstVertsNormalized[dvi], srcVertsNormalized[nearestIdx]);
+                                }
+                                else
+                                {
+                                    nearestIdx = FindNearestVertexOptimized(dv, srcVerts, spatialHash, cellSize, maxDist);
+                                    if (nearestIdx >= 0)
+                                        nearestDist = Vector3.Distance(dv, srcVerts[nearestIdx]);
+                                }
+
+                                if (nearestIdx >= 0)
+                                {
+                                    float distanceWeight = 1f - (nearestDist / maxDist);
+                                    float smartWeight = topologySimilarity * distanceWeight;
+
+                                    approxDeltaVertices[dvi] = deltaVertices[nearestIdx] * smartWeight;
+                                    approxDeltaNormals[dvi] = deltaNormals[nearestIdx] * smartWeight;
+                                    approxDeltaTangents[dvi] = deltaTangents[nearestIdx] * smartWeight;
+                                }
                             }
                         }
 
@@ -3455,6 +3691,202 @@ namespace NDMFMerge.Editor
                 hash[cell].Add(i);
             }
             return hash;
+        }
+
+        private struct VertexDistance
+        {
+            public int index;
+            public float distance;
+        }
+
+        private Vector3[] NormalizeVerticesToBounds(Vector3[] vertices, Bounds bounds)
+        {
+            var normalized = new Vector3[vertices.Length];
+            Vector3 size = bounds.size;
+            Vector3 min = bounds.min;
+
+            float sx = Mathf.Max(1e-6f, size.x);
+            float sy = Mathf.Max(1e-6f, size.y);
+            float sz = Mathf.Max(1e-6f, size.z);
+
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                var v = vertices[i];
+                normalized[i] = new Vector3(
+                    (v.x - min.x) / sx,
+                    (v.y - min.y) / sy,
+                    (v.z - min.z) / sz);
+            }
+
+            return normalized;
+        }
+
+        private int FindNearestVertexLinear(Vector3 targetPos, Vector3[] vertices, float maxDistance)
+        {
+            int nearestIdx = -1;
+            float nearestDist = maxDistance;
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                float dist = Vector3.Distance(targetPos, vertices[i]);
+                if (dist < nearestDist)
+                {
+                    nearestDist = dist;
+                    nearestIdx = i;
+                }
+            }
+            return nearestIdx;
+        }
+
+        private AnimatorController EnsureMutableAnimatorControllerOnAvatar(Component cvrAvatar, Transform avatarRootClone)
+        {
+            if (cvrAvatar == null) return null;
+
+            var current = GetPreferredController(cvrAvatar);
+            if (current == null) return null;
+
+            if (EditorUtility.IsPersistent(current))
+            {
+                var cloned = UnityEngine.Object.Instantiate(current);
+                cloned.name = current.name + " (NDMF Generated)";
+                TrySetActualControllerOnAvatar(cvrAvatar, cloned, avatarRootClone);
+                return cloned;
+            }
+
+            return current;
+        }
+
+        private string GetPathRelativeToRoot(Transform root, Transform target)
+        {
+            if (root == null || target == null) return null;
+            if (!target.IsChildOf(root)) return null;
+            if (target == root) return string.Empty;
+
+            var parts = new List<string>();
+            var current = target;
+            while (current != null && current != root)
+            {
+                parts.Add(current.name);
+                current = current.parent;
+            }
+            parts.Reverse();
+            return string.Join("/", parts);
+        }
+
+        private void CopyGeneratedBlendshapeCurvesToTarget(Component targetCVRAvatar, Transform avatarRoot, SkinnedMeshRenderer sourceRenderer, SkinnedMeshRenderer targetRenderer, HashSet<string> shapeNames, CVRMergeArmature merger, BlendShapeTransferSettings settings)
+        {
+            if (targetCVRAvatar == null || avatarRoot == null || sourceRenderer == null || targetRenderer == null || shapeNames == null || shapeNames.Count == 0)
+                return;
+
+            if (!targetCVRAvatar.transform.IsChildOf(avatarRoot))
+                return;
+
+            var controller = EnsureMutableAnimatorControllerOnAvatar(targetCVRAvatar, avatarRoot);
+            if (controller == null) return;
+
+            string sourcePath = GetPathRelativeToRoot(avatarRoot, sourceRenderer.transform);
+            string targetPath = GetPathRelativeToRoot(avatarRoot, targetRenderer.transform);
+            if (targetPath == null) return;
+
+            int copiedCurves = 0;
+            foreach (var clip in controller.animationClips.Distinct())
+            {
+                if (clip == null) continue;
+                bool clipChanged = false;
+
+                var bindings = AnimationUtility.GetCurveBindings(clip);
+                foreach (var shapeName in shapeNames)
+                {
+                    if (string.IsNullOrWhiteSpace(shapeName)) continue;
+                    string propertyName = "blendShape." + shapeName;
+
+                    bool targetAlreadyExists = bindings.Any(b => b.type == typeof(SkinnedMeshRenderer) && b.path == targetPath && b.propertyName == propertyName);
+                    if (targetAlreadyExists) continue;
+
+                    EditorCurveBinding template = default;
+                    bool foundTemplate = false;
+
+                    if (!string.IsNullOrEmpty(sourcePath))
+                    {
+                        var sourceBinding = bindings.FirstOrDefault(b => b.type == typeof(SkinnedMeshRenderer) && b.path == sourcePath && b.propertyName == propertyName);
+                        if (!string.IsNullOrEmpty(sourceBinding.propertyName))
+                        {
+                            template = sourceBinding;
+                            foundTemplate = true;
+                        }
+                    }
+
+                    if (!foundTemplate)
+                    {
+                        var anyBinding = bindings.FirstOrDefault(b => b.type == typeof(SkinnedMeshRenderer) && b.propertyName == propertyName);
+                        if (!string.IsNullOrEmpty(anyBinding.propertyName))
+                        {
+                            template = anyBinding;
+                            foundTemplate = true;
+                        }
+                    }
+
+                    if (!foundTemplate) continue;
+
+                    var curve = AnimationUtility.GetEditorCurve(clip, template);
+                    if (curve == null) continue;
+
+                    var newBinding = template;
+                    newBinding.path = targetPath;
+                    AnimationUtility.SetEditorCurve(clip, newBinding, curve);
+                    clipChanged = true;
+                    copiedCurves++;
+                }
+
+                if (clipChanged)
+                    EditorUtility.SetDirty(clip);
+            }
+
+            bool verbose = merger != null && (merger.verboseLogging || (settings != null && settings.verboseLogging));
+            if (verbose && copiedCurves > 0)
+                mergeLog.AppendLine($"  [Blend Shape Animation Copy] Added {copiedCurves} curve(s) for target mesh '{targetRenderer.name}'");
+        }
+
+        private List<VertexDistance> FindKNearestVerticesOptimized(Vector3 targetPos, Vector3[] vertices, Dictionary<Vector3Int, List<int>> spatialHash, float cellSize, float maxDistance, int k)
+        {
+            var best = new List<VertexDistance>(k);
+
+            var cell = new Vector3Int(
+                Mathf.FloorToInt(targetPos.x / cellSize),
+                Mathf.FloorToInt(targetPos.y / cellSize),
+                Mathf.FloorToInt(targetPos.z / cellSize));
+
+            void ConsiderIndex(int idx)
+            {
+                float dist = Vector3.Distance(targetPos, vertices[idx]);
+                if (dist > maxDistance) return;
+                best.Add(new VertexDistance { index = idx, distance = dist });
+            }
+
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        var checkCell = new Vector3Int(cell.x + dx, cell.y + dy, cell.z + dz);
+                        if (!spatialHash.TryGetValue(checkCell, out var cellIndices)) continue;
+                        foreach (int idx in cellIndices)
+                            ConsiderIndex(idx);
+                    }
+                }
+            }
+
+            if (best.Count == 0)
+            {
+                for (int i = 0; i < vertices.Length; i++)
+                    ConsiderIndex(i);
+            }
+
+            best.Sort((a, b) => a.distance.CompareTo(b.distance));
+            if (best.Count > k)
+                best.RemoveRange(k, best.Count - k);
+
+            return best;
         }
 
         // === FIND NEAREST VERTEX using spatial hash (O(1) average vs O(n) linear) ===
@@ -3571,6 +4003,78 @@ namespace NDMFMerge.Editor
             }
 
             return null;
+        }
+
+        private SkinnedMeshRenderer ResolveRendererInCloneHierarchy(SkinnedMeshRenderer selected, Transform avatarRoot)
+        {
+            if (selected == null || avatarRoot == null) return null;
+            if (selected.transform.IsChildOf(avatarRoot)) return selected;
+
+            var candidates = avatarRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            string selectedMeshName = selected.sharedMesh != null ? selected.sharedMesh.name : null;
+            string selectedPath = GetTransformPath(selected.transform);
+
+            foreach (var candidate in candidates)
+            {
+                if (candidate == null) continue;
+                if (!string.Equals(candidate.name, selected.name, StringComparison.Ordinal)) continue;
+
+                if (!string.IsNullOrEmpty(selectedMeshName))
+                {
+                    var candidateMeshName = candidate.sharedMesh != null ? candidate.sharedMesh.name : null;
+                    if (!string.Equals(candidateMeshName, selectedMeshName, StringComparison.Ordinal))
+                        continue;
+                }
+
+                string candidatePath = GetTransformPath(candidate.transform);
+                if (candidatePath.EndsWith(selectedPath, StringComparison.Ordinal))
+                    return candidate;
+            }
+
+            foreach (var candidate in candidates)
+            {
+                if (candidate == null) continue;
+                if (!string.Equals(candidate.name, selected.name, StringComparison.Ordinal)) continue;
+                if (selectedMeshName == null) return candidate;
+                if (candidate.sharedMesh != null && string.Equals(candidate.sharedMesh.name, selectedMeshName, StringComparison.Ordinal))
+                    return candidate;
+            }
+
+            return null;
+        }
+
+        private string GetTransformPath(Transform t)
+        {
+            if (t == null) return string.Empty;
+            var names = new List<string>();
+            var current = t;
+            while (current != null)
+            {
+                names.Add(current.name);
+                current = current.parent;
+            }
+            names.Reverse();
+            return string.Join("/", names);
+        }
+
+        private Transform ResolveTransformInCloneHierarchy(Transform selected, Transform avatarRoot)
+        {
+            if (selected == null || avatarRoot == null) return null;
+            if (selected.IsChildOf(avatarRoot)) return selected;
+
+            string selectedPath = GetTransformPath(selected);
+            var all = avatarRoot.GetComponentsInChildren<Transform>(true);
+
+            foreach (var candidate in all)
+            {
+                if (candidate == null) continue;
+                if (!string.Equals(candidate.name, selected.name, StringComparison.Ordinal)) continue;
+                string candidatePath = GetTransformPath(candidate);
+                if (candidatePath.EndsWith(selectedPath, StringComparison.Ordinal))
+                    return candidate;
+            }
+
+            return all.FirstOrDefault(t => t != null && string.Equals(t.name, selected.name, StringComparison.Ordinal));
         }
 
         private int FindBlendShapeIndexByName(Mesh mesh, string name)

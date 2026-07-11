@@ -55,8 +55,12 @@ namespace NDMFMerge.Editor
             // --- Status Banner ---
             if (merger.GetCVRAvatar() == null)
             {
+                bool hasArmatureModeEntries = merger.outfitsToMerge != null && merger.outfitsToMerge.Any(o => o != null && o.outfit != null && o.mergeMode == OutfitMergeMode.Armature);
                 EditorGUILayout.Space(3);
-                EditorGUILayout.HelpBox("⚠ Missing CVRAvatar Component! This script requires an avatar root.", MessageType.Error);
+                if (hasArmatureModeEntries)
+                    EditorGUILayout.HelpBox("⚠ Missing CVRAvatar Component! Armature mode entries require an avatar root.", MessageType.Error);
+                else
+                    EditorGUILayout.HelpBox("Object mode only setup detected. CVRAvatar is optional unless you also use Armature mode entries.", MessageType.Info);
                 EditorGUILayout.Space(3);
             }
 
@@ -188,37 +192,99 @@ namespace NDMFMerge.Editor
                     // Outfit Reference
                     EditorGUI.BeginChangeCheck();
                     EditorGUILayout.PropertyField(element.FindPropertyRelative("outfit"), new GUIContent("Outfit GameObject"));
-                    if (EditorGUI.EndChangeCheck()) statsNeedUpdate = true;
-
-                    EditorGUILayout.Space(8);
-                    DrawSubsectionLabel("Naming Rules");
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("prefix"), new GUIContent("Bone Prefix to Strip"));
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("suffix"), new GUIContent("Bone Suffix to Strip"));
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("uniqueBonePrefix"), new GUIContent("Unique Bone Prefix"));
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("meshPrefix"), new GUIContent("Mesh Name Prefix"));
-
-                    EditorGUILayout.Space(8);
-                    DrawSubsectionLabel("Mesh Fixes");
-                    var boundsProp = element.FindPropertyRelative("boundsFixMode");
-                    EditorGUILayout.PropertyField(boundsProp, new GUIContent("Bounds Fix Mode"));
-                    if (boundsProp.enumValueIndex == (int)NDMFMerge.Runtime.BoundsFixMode.CopyFromSelected)
+                    EditorGUILayout.PropertyField(element.FindPropertyRelative("mergeMode"), new GUIContent("Merge Mode"));
+                    if (EditorGUI.EndChangeCheck())
                     {
-                        EditorGUILayout.PropertyField(element.FindPropertyRelative("referenceBodyMesh"), new GUIContent("Reference Body Mesh"));
-                    }
-                    
-                    var probeModeProp = element.FindPropertyRelative("probeAnchorSyncMode");
-                    EditorGUILayout.PropertyField(probeModeProp, new GUIContent("Probe Anchor Sync"));
-                    if (probeModeProp.enumValueIndex == (int)NDMFMerge.Runtime.ProbeAnchorSyncMode.CopyFromSelected)
-                    {
-                        EditorGUILayout.PropertyField(element.FindPropertyRelative("referenceProbeAnchorMesh"), new GUIContent("Reference Probe Mesh"));
-                    }
-                    
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("forceScaleToOne"), new GUIContent("Force Scale (1,1,1)"));
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("removeUnusedBones"), new GUIContent("Remove Unused Bones"));
+                        statsNeedUpdate = true;
 
-                    EditorGUILayout.Space(8);
-                    DrawSubsectionLabel("Bone Mappings (Per-Outfit)");
-                    EditorGUILayout.PropertyField(element.FindPropertyRelative("boneNameMappings"), new GUIContent("Custom Bone Maps"), true);
+                        var selectedOutfit = element.FindPropertyRelative("outfit").objectReferenceValue as GameObject;
+                        if (selectedOutfit != null && !HasDetectableArmature(selectedOutfit.transform))
+                        {
+                            element.FindPropertyRelative("mergeMode").enumValueIndex = (int)OutfitMergeMode.Object;
+                        }
+                    }
+
+                    var mergeModeProp = element.FindPropertyRelative("mergeMode");
+                    bool isObjectMode = mergeModeProp.enumValueIndex == (int)OutfitMergeMode.Object;
+
+                    if (isObjectMode)
+                    {
+                        EditorGUILayout.Space(8);
+                        DrawSubsectionLabel("Object Mode Target");
+                        var objectSettings = element.FindPropertyRelative("objectMergeSettings");
+                        EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("placementMode"), new GUIContent("Positioning Mode"));
+                        EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("targetParent"), new GUIContent("Target GameObject"));
+
+                        var placementModeProp = objectSettings.FindPropertyRelative("placementMode");
+                        var placementMode = (ObjectPlacementMode)placementModeProp.enumValueIndex;
+
+                        if (placementMode == ObjectPlacementMode.WeightMeshesToTargetBoneAtCurrentPosition)
+                        {
+                            EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("targetBone"), new GUIContent("Target Bone"));
+                        }
+                        else if (placementMode == ObjectPlacementMode.PlaceUsingReference)
+                        {
+                            EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("referenceTransform"), new GUIContent("Reference Object"));
+                        }
+                        else if (placementMode == ObjectPlacementMode.PlaceUsingValues)
+                        {
+                            EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("localPositionOffset"), new GUIContent("Position Values"));
+                            EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("localRotationOffset"), new GUIContent("Rotation Values"));
+                            EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("localScaleOffset"), new GUIContent("Scale Values"));
+                        }
+
+                        EditorGUILayout.Space(8);
+                        DrawSubsectionLabel("Mesh Fixes");
+                        var boundsProp = element.FindPropertyRelative("boundsFixMode");
+                        EditorGUILayout.PropertyField(boundsProp, new GUIContent("Bounds Fix Mode"));
+                        if (boundsProp.enumValueIndex == (int)NDMFMerge.Runtime.BoundsFixMode.CopyFromSelected)
+                        {
+                            EditorGUILayout.PropertyField(element.FindPropertyRelative("referenceBodyMesh"), new GUIContent("Reference Body Mesh"));
+                        }
+
+                        var probeModeProp = element.FindPropertyRelative("probeAnchorSyncMode");
+                        EditorGUILayout.PropertyField(probeModeProp, new GUIContent("Probe Anchor Sync"));
+                        if (probeModeProp.enumValueIndex == (int)NDMFMerge.Runtime.ProbeAnchorSyncMode.CopyFromSelected)
+                        {
+                            EditorGUILayout.PropertyField(element.FindPropertyRelative("referenceProbeAnchorMesh"), new GUIContent("Reference Probe Mesh"));
+                        }
+
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("forceScaleToOne"), new GUIContent("Force Scale (1,1,1)"));
+
+                        EditorGUILayout.HelpBox("Object mode ignores armature and bone mapping settings for this outfit entry.", MessageType.Info);
+                    }
+                    else
+                    {
+
+                        EditorGUILayout.Space(8);
+                        DrawSubsectionLabel("Naming Rules");
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("prefix"), new GUIContent("Bone Prefix to Strip"));
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("suffix"), new GUIContent("Bone Suffix to Strip"));
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("uniqueBonePrefix"), new GUIContent("Unique Bone Prefix"));
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("meshPrefix"), new GUIContent("Mesh Name Prefix"));
+
+                        EditorGUILayout.Space(8);
+                        DrawSubsectionLabel("Mesh Fixes");
+                        var boundsProp = element.FindPropertyRelative("boundsFixMode");
+                        EditorGUILayout.PropertyField(boundsProp, new GUIContent("Bounds Fix Mode"));
+                        if (boundsProp.enumValueIndex == (int)NDMFMerge.Runtime.BoundsFixMode.CopyFromSelected)
+                        {
+                            EditorGUILayout.PropertyField(element.FindPropertyRelative("referenceBodyMesh"), new GUIContent("Reference Body Mesh"));
+                        }
+
+                        var probeModeProp = element.FindPropertyRelative("probeAnchorSyncMode");
+                        EditorGUILayout.PropertyField(probeModeProp, new GUIContent("Probe Anchor Sync"));
+                        if (probeModeProp.enumValueIndex == (int)NDMFMerge.Runtime.ProbeAnchorSyncMode.CopyFromSelected)
+                        {
+                            EditorGUILayout.PropertyField(element.FindPropertyRelative("referenceProbeAnchorMesh"), new GUIContent("Reference Probe Mesh"));
+                        }
+
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("forceScaleToOne"), new GUIContent("Force Scale (1,1,1)"));
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("removeUnusedBones"), new GUIContent("Remove Unused Bones"));
+
+                        EditorGUILayout.Space(8);
+                        EditorGUILayout.PropertyField(element.FindPropertyRelative("boneNameMappings"), new GUIContent("Custom Bone Maps"), true);
+                    }
 
                     EditorGUILayout.Space(8);
                     DrawSubsectionLabel("Animator Merging");
@@ -255,6 +321,28 @@ namespace NDMFMerge.Editor
             };
             EditorGUILayout.LabelField(label, style);
             EditorGUILayout.Space(1);
+        }
+
+        private bool HasDetectableArmature(Transform root)
+        {
+            if (root == null) return false;
+
+            var smr = root.GetComponentInChildren<SkinnedMeshRenderer>(true);
+            if (smr != null && smr.rootBone != null) return true;
+
+            string[] names = { "Armature", "armature", "Skeleton", "skeleton", "Root", "root" };
+            foreach (var n in names)
+            {
+                if (root.Find(n) != null) return true;
+            }
+
+            foreach (Transform child in root)
+            {
+                if (child.childCount >= 3 && child.GetComponent<SkinnedMeshRenderer>() == null)
+                    return true;
+            }
+
+            return false;
         }
 
         private void DrawCompactSubsectionLabel(string label)
@@ -1482,93 +1570,194 @@ namespace NDMFMerge.Editor
         {
             var settings = merger.blendShapeTransferSettings;
             if (settings == null) return;
+            settings.EnsureMigrated();
 
-            EditorGUILayout.LabelField("Weight Transfer (Copy Values)", EditorStyles.boldLabel);
-            EditorGUI.indentLevel++;
-            settings.enableWeightTransfer = EditorGUILayout.Toggle("Enable Weight Transfer", settings.enableWeightTransfer);
-            if (settings.enableWeightTransfer)
-            {
-                settings.weightTransferDirection = (BlendShapeTransferDirection)EditorGUILayout.EnumPopup("Direction", settings.weightTransferDirection);
-                settings.matchByName = EditorGUILayout.Toggle("Match by Name", settings.matchByName);
-                settings.minWeightThreshold = EditorGUILayout.Slider("Min Weight Threshold", settings.minWeightThreshold, 0f, 1f);
-                settings.useSmartWeightTransfer = EditorGUILayout.Toggle("Use Smart Weight Transfer", settings.useSmartWeightTransfer);
-            }
-            EditorGUI.indentLevel--;
-
-            EditorGUILayout.Space(10);
-
-            EditorGUILayout.LabelField("Blend Shape Generation (Create Frames)", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Blend Shape Tasks", EditorStyles.boldLabel);
             EditorGUI.indentLevel++;
 
-            // Draw generation tasks list
-            if (settings.generationTasks == null)
-                settings.generationTasks = new List<BlendShapeGenerationTask>();
+            if (settings.tasks == null)
+                settings.tasks = new List<BlendShapeTransferTask>();
 
-            EditorGUILayout.LabelField($"Generation Tasks ({settings.generationTasks.Count})", EditorStyles.label);
-            
-            for (int i = 0; i < settings.generationTasks.Count; i++)
+            EditorGUILayout.LabelField($"Tasks ({settings.tasks.Count})", EditorStyles.label);
+
+            for (int i = 0; i < settings.tasks.Count; i++)
             {
-                DrawGenerationTask(merger, settings.generationTasks[i], i);
+                DrawBlendShapeTask(merger, settings.tasks[i], i);
+
+                EditorGUILayout.BeginHorizontal();
+                GUI.enabled = i > 0;
+                if (GUILayout.Button(new GUIContent("Up", "Move this task one position up."), GUILayout.Width(60)))
+                {
+                    var tmp = settings.tasks[i - 1];
+                    settings.tasks[i - 1] = settings.tasks[i];
+                    settings.tasks[i] = tmp;
+                    GUI.enabled = true;
+                    EditorGUILayout.EndHorizontal();
+                    break;
+                }
+                GUI.enabled = i < settings.tasks.Count - 1;
+                if (GUILayout.Button(new GUIContent("Down", "Move this task one position down."), GUILayout.Width(60)))
+                {
+                    var tmp = settings.tasks[i + 1];
+                    settings.tasks[i + 1] = settings.tasks[i];
+                    settings.tasks[i] = tmp;
+                    GUI.enabled = true;
+                    EditorGUILayout.EndHorizontal();
+                    break;
+                }
+                GUI.enabled = true;
+
+                if (GUILayout.Button(new GUIContent("Duplicate", "Create a copy of this task directly below it."), GUILayout.Width(90)))
+                {
+                    settings.tasks.Insert(i + 1, CloneBlendShapeTask(settings.tasks[i]));
+                    EditorGUILayout.EndHorizontal();
+                    break;
+                }
+
+                GUI.backgroundColor = new Color(1f, 0.7f, 0.7f);
+                if (GUILayout.Button(new GUIContent("Delete", "Remove this task."), GUILayout.Width(70)))
+                {
+                    settings.tasks.RemoveAt(i);
+                    GUI.backgroundColor = Color.white;
+                    EditorGUILayout.EndHorizontal();
+                    break;
+                }
+                GUI.backgroundColor = Color.white;
+                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.Space(4);
             }
 
             EditorGUILayout.Space(5);
-            if (GUILayout.Button("+ Add Generation Task", GUILayout.Height(24)))
+            if (GUILayout.Button("+ Add Blend Shape Task", GUILayout.Height(24)))
             {
-                settings.generationTasks.Add(new BlendShapeGenerationTask());
+                settings.tasks.Add(new BlendShapeTransferTask());
             }
 
-            if (settings.generationTasks.Count > 0 && GUILayout.Button("- Remove Last Task", GUILayout.Height(24)))
+            if (settings.tasks.Count > 0 && GUILayout.Button("- Remove Last Task", GUILayout.Height(24)))
             {
-                settings.generationTasks.RemoveAt(settings.generationTasks.Count - 1);
+                settings.tasks.RemoveAt(settings.tasks.Count - 1);
             }
 
             EditorGUI.indentLevel--;
         }
 
-        private void DrawGenerationTask(CVRMergeArmature merger, BlendShapeGenerationTask task, int taskIndex)
+        private void DrawBlendShapeTask(CVRMergeArmature merger, BlendShapeTransferTask task, int taskIndex)
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             
             EditorGUILayout.LabelField($"Task {taskIndex + 1}", EditorStyles.boldLabel);
             EditorGUI.indentLevel++;
 
-            task.enabled = EditorGUILayout.Toggle("Enabled", task.enabled);
-            task.sourceGenerationMesh = EditorGUILayout.ObjectField("Source Mesh", task.sourceGenerationMesh, typeof(SkinnedMeshRenderer), true) as SkinnedMeshRenderer;
+            task.enabled = EditorGUILayout.Toggle(new GUIContent("Enabled", "Enable or disable this blendshape task."), task.enabled);
+            task.direction = (BlendShapeTransferDirection)EditorGUILayout.EnumPopup(new GUIContent("Direction", "Choose transfer direction for this task (Outfit/Base/Bidirectional/Mesh -> Mesh)."), task.direction);
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Weight Transfer", EditorStyles.boldLabel);
+            task.enableWeightTransfer = EditorGUILayout.Toggle(new GUIContent("Enable Weight Transfer", "Copy current blendshape weight values using this task's direction and matching options."), task.enableWeightTransfer);
+            if (task.enableWeightTransfer)
+            {
+                if (task.direction == BlendShapeTransferDirection.MeshToMesh)
+                {
+                    task.weightTransferSourceMesh = EditorGUILayout.ObjectField(new GUIContent("Source Mesh", "Mesh to read blendshape weights from."), task.weightTransferSourceMesh, typeof(SkinnedMeshRenderer), true) as SkinnedMeshRenderer;
+                    task.weightTransferTargetMesh = EditorGUILayout.ObjectField(new GUIContent("Target Mesh", "Mesh to write blendshape weights to."), task.weightTransferTargetMesh, typeof(SkinnedMeshRenderer), true) as SkinnedMeshRenderer;
+                    if (task.weightTransferSourceMesh == null || task.weightTransferTargetMesh == null)
+                        EditorGUILayout.HelpBox("Mesh -> Mesh weight transfer requires source and target mesh.", MessageType.Warning);
+                }
+                task.matchByName = EditorGUILayout.Toggle(new GUIContent("Match by Name", "When enabled, blendshapes are matched by name. When disabled, index-based fallback is used."), task.matchByName);
+                task.minWeightThreshold = EditorGUILayout.Slider(new GUIContent("Min Weight Threshold", "Skip applying weights below this value."), task.minWeightThreshold, 0f, 1f);
+                task.useSmartWeightTransfer = EditorGUILayout.Toggle(new GUIContent("Use Smart Weight Transfer", "Scales transferred values when topology similarity is low."), task.useSmartWeightTransfer);
+            }
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Frame Generation", EditorStyles.boldLabel);
+            task.enableGeneration = EditorGUILayout.Toggle(new GUIContent("Enable Generation", "Generate actual blendshape frames on target meshes."), task.enableGeneration);
+            if (task.enableGeneration)
+            {
+            task.sourceGenerationMesh = EditorGUILayout.ObjectField(new GUIContent("Source Mesh", "Mesh used as the deformation source for frame generation."), task.sourceGenerationMesh, typeof(SkinnedMeshRenderer), true) as SkinnedMeshRenderer;
             
             EditorGUILayout.Space(5);
-            task.blendShapeNamesToGenerate = EditorGUILayout.TextField("Blend Shapes (comma-separated)", task.blendShapeNamesToGenerate);
+            task.blendShapeNamesToGenerate = EditorGUILayout.TextField(new GUIContent("Blend Shapes (comma-separated)", "Names to generate. Leave empty to process all blendshapes from source mesh."), task.blendShapeNamesToGenerate);
             EditorGUILayout.HelpBox("Leave empty to generate all blend shapes from source mesh.", MessageType.Info);
 
             EditorGUILayout.Space(5);
-            // Single foldout list for generation targets
-            if (!generationTargetFoldouts.TryGetValue(taskIndex, out bool fold)) fold = true;
-            fold = EditorGUILayout.Foldout(fold, "Generation Targets", true, EditorStyles.foldoutHeader);
-            generationTargetFoldouts[taskIndex] = fold;
-            if (fold)
+            bool meshToMesh = task.direction == BlendShapeTransferDirection.MeshToMesh;
+            if (meshToMesh)
             {
-                EditorGUI.indentLevel++;
-                DrawOutfitSelection(merger, task);
-                EditorGUI.indentLevel--;
+                task.targetGenerationMesh = EditorGUILayout.ObjectField(new GUIContent("Target Mesh", "Mesh where generated blendshape frames will be added."), task.targetGenerationMesh, typeof(SkinnedMeshRenderer), true) as SkinnedMeshRenderer;
+                if (task.sourceGenerationMesh == null || task.targetGenerationMesh == null)
+                    EditorGUILayout.HelpBox("Mesh -> Mesh generation requires both source and target meshes.", MessageType.Warning);
+            }
+            else
+            {
+                // Single foldout list for generation targets
+                if (!generationTargetFoldouts.TryGetValue(taskIndex, out bool fold)) fold = true;
+                fold = EditorGUILayout.Foldout(fold, "Generation Targets", true, EditorStyles.foldoutHeader);
+                generationTargetFoldouts[taskIndex] = fold;
+                if (fold)
+                {
+                    EditorGUI.indentLevel++;
+                    DrawOutfitSelection(merger, task);
+                    EditorGUI.indentLevel--;
+                }
             }
 
             EditorGUILayout.Space(5);
-            task.transferMode = (BlendShapeTransferMode)EditorGUILayout.EnumPopup("Transfer Mode", task.transferMode);
-            task.maxMappingDistance = EditorGUILayout.Slider("Max Mapping Distance", task.maxMappingDistance, 0f, 0.1f);
-            task.useSmartFrameGeneration = EditorGUILayout.Toggle("Use Smart Frame Generation", task.useSmartFrameGeneration);
-            task.overrideExisting = EditorGUILayout.Toggle("Override Existing", task.overrideExisting);
+            task.transferMode = (BlendShapeTransferMode)EditorGUILayout.EnumPopup(new GUIContent("Transfer Method", "Algorithm used to map source deformation to target topology."), task.transferMode);
+            task.maxMappingDistance = EditorGUILayout.Slider(new GUIContent("Max Mapping Distance", "Maximum allowed source-target vertex distance when matching deformation."), task.maxMappingDistance, 0f, 0.1f);
+            task.useSmartFrameGeneration = EditorGUILayout.Toggle(new GUIContent("Use Smart Frame Generation", "Applies topology-aware scaling while generating frame deltas."), task.useSmartFrameGeneration);
+            task.overrideExisting = EditorGUILayout.Toggle(new GUIContent("Override Existing", "If enabled, existing destination blendshapes with same names are replaced/updated."), task.overrideExisting);
+            task.copyGeneratedBlendshapeAnimations = EditorGUILayout.Toggle(new GUIContent("Add to Existing Animations", "Find existing blendshape curves in base avatar animations and duplicate matching curves onto generated target meshes."), task.copyGeneratedBlendshapeAnimations);
+            }
 
             EditorGUI.indentLevel--;
             EditorGUILayout.EndVertical();
         }
 
-        private void DrawOutfitSelection(CVRMergeArmature merger, BlendShapeGenerationTask task)
+        private BlendShapeTransferTask CloneBlendShapeTask(BlendShapeTransferTask source)
+        {
+            if (source == null) return new BlendShapeTransferTask();
+
+            return new BlendShapeTransferTask
+            {
+                enabled = source.enabled,
+                direction = source.direction,
+                enableWeightTransfer = source.enableWeightTransfer,
+                weightTransferSourceMesh = source.weightTransferSourceMesh,
+                weightTransferTargetMesh = source.weightTransferTargetMesh,
+                matchByName = source.matchByName,
+                minWeightThreshold = source.minWeightThreshold,
+                useSmartWeightTransfer = source.useSmartWeightTransfer,
+                enableGeneration = source.enableGeneration,
+                sourceGenerationMesh = source.sourceGenerationMesh,
+                targetGenerationMesh = source.targetGenerationMesh,
+                blendShapeNamesToGenerate = source.blendShapeNamesToGenerate,
+                generateOnBase = source.generateOnBase,
+                generateOnOutfits = source.generateOnOutfits,
+                targetOutfitNames = source.targetOutfitNames != null ? new List<string>(source.targetOutfitNames) : new List<string>(),
+                applyToAllTargets = source.applyToAllTargets,
+                transferMode = source.transferMode,
+                maxMappingDistance = source.maxMappingDistance,
+                useSmartFrameGeneration = source.useSmartFrameGeneration,
+                overrideExisting = source.overrideExisting,
+                copyGeneratedBlendshapeAnimations = source.copyGeneratedBlendshapeAnimations
+            };
+        }
+
+        private void DrawOutfitSelection(CVRMergeArmature merger, BlendShapeTransferTask task)
         {
             EditorGUILayout.LabelField("Select Targets:", EditorStyles.label);
             
             // Add "Base Avatar" as a special entry
             if (task.targetOutfitNames == null) task.targetOutfitNames = new List<string>();
+            task.applyToAllTargets = EditorGUILayout.Toggle(new GUIContent("Apply To All", "Target Base Avatar and all outfits for this generation task."), task.applyToAllTargets);
+            if (task.applyToAllTargets)
+            {
+                EditorGUILayout.HelpBox("This task will target Base Avatar and all outfits.", MessageType.Info);
+                return;
+            }
+
             bool hasBase = task.targetOutfitNames.Contains("Base Avatar");
-            bool newHasBase = EditorGUILayout.Toggle("Base Avatar", hasBase);
+            bool newHasBase = EditorGUILayout.Toggle(new GUIContent("Base Avatar", "Apply generation to base avatar meshes (excluding cloned outfit meshes)."), hasBase);
             if (newHasBase && !hasBase)
                 task.targetOutfitNames.Add("Base Avatar");
             else if (!newHasBase && hasBase)
