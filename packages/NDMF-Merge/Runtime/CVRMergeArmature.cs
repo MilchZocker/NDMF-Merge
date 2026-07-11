@@ -2,6 +2,7 @@ using UnityEngine;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using UnityEngine.Serialization;
 
 namespace NDMFMerge.Runtime
 {
@@ -56,13 +57,43 @@ namespace NDMFMerge.Runtime
     }
 
     [Serializable]
-    public class BlendShapeGenerationTask
+    public class BlendShapeTransferTask
     {
-        [Tooltip("Enable this generation task.")]
+        [Tooltip("Enable this blend shape task.")]
         public bool enabled = true;
+
+        [Tooltip("Direction used by this task.")]
+        public BlendShapeTransferDirection direction = BlendShapeTransferDirection.OutfitToBase;
+
+        [Header("Weight Transfer (Copy Values)")]
+        [Tooltip("Enable weight transfer for this task.")]
+        public bool enableWeightTransfer = true;
+
+        [Tooltip("Source mesh used when direction is Mesh -> Mesh (weight transfer).")]
+        public SkinnedMeshRenderer weightTransferSourceMesh;
+
+        [Tooltip("Target mesh used when direction is Mesh -> Mesh (weight transfer).")]
+        public SkinnedMeshRenderer weightTransferTargetMesh;
+
+        [Tooltip("Match blend shapes by name for weight transfer.")]
+        public bool matchByName = true;
+
+        [Tooltip("Minimum weight threshold to consider for transfer.")]
+        [Range(0f, 1f)]
+        public float minWeightThreshold = 0.0f;
+
+        [Tooltip("Use smart weight transfer that considers mesh topology similarity.")]
+        public bool useSmartWeightTransfer = true;
+
+        [Header("Blend Shape Generation (Create Frames)")]
+        [Tooltip("Enable frame generation for this task.")]
+        public bool enableGeneration = false;
 
         [Tooltip("Source mesh to copy blend shapes from.")]
         public SkinnedMeshRenderer sourceGenerationMesh;
+
+        [Tooltip("Target mesh used when generation direction is Mesh -> Mesh.")]
+        public SkinnedMeshRenderer targetGenerationMesh;
 
         [Tooltip("Blend shape names to generate (comma-separated). Leave empty to generate all.")]
         public string blendShapeNamesToGenerate = "";
@@ -76,7 +107,10 @@ namespace NDMFMerge.Runtime
         [Tooltip("List of outfit names to generate blend shapes on.")]
         public List<string> targetOutfitNames = new List<string>();
 
-        [Tooltip("Transfer mode for frame generation.")]
+        [Tooltip("Apply generation to base avatar and all outfit targets.")]
+        public bool applyToAllTargets = false;
+
+        [Tooltip("Frame transfer method used for generation.")]
         public BlendShapeTransferMode transferMode = BlendShapeTransferMode.TransferFramesApproximate;
 
         [Tooltip("Max vertex-mapping distance for approximate frame transfer (meters).")]
@@ -88,6 +122,14 @@ namespace NDMFMerge.Runtime
 
         [Tooltip("If true, override existing blend shapes on the destination mesh. If false, skip generation for blend shapes that already exist.")]
         public bool overrideExisting = false;
+
+        [Tooltip("After generation, add matching blendshape curves from existing base-avatar animations onto generated target meshes.")]
+        public bool copyGeneratedBlendshapeAnimations = false;
+    }
+
+    [Serializable]
+    public class BlendShapeGenerationTask : BlendShapeTransferTask
+    {
     }
 
     [Serializable]
@@ -97,32 +139,84 @@ namespace NDMFMerge.Runtime
         [Tooltip("Enable verbose logging for blend shape transfer operations.")]
         public bool verboseLogging = false;
 
-        [Header("Weight Transfer (Copy Values)")]
-        [Tooltip("Enable blend shape weight transfer (copy current values between meshes).")]
-        public bool enableWeightTransfer = false;
+        [Tooltip("List of blend shape tasks to execute.")]
+        public List<BlendShapeTransferTask> tasks = new List<BlendShapeTransferTask>();
 
-        [Tooltip("Direction of weight transfer: from outfit to base, base to outfit, or both.")]
-        public BlendShapeTransferDirection weightTransferDirection = BlendShapeTransferDirection.OutfitToBase;
+        [Header("Legacy Compatibility")]
+        [FormerlySerializedAs("enableWeightTransfer")]
+        [SerializeField, HideInInspector] public bool legacyEnableWeightTransfer = false;
 
-        [Tooltip("Match blend shapes by name for weight transfer.")]
-        public bool matchByName = true;
+        [FormerlySerializedAs("weightTransferDirection")]
+        [SerializeField, HideInInspector] public BlendShapeTransferDirection legacyWeightTransferDirection = BlendShapeTransferDirection.OutfitToBase;
 
-        [Tooltip("Minimum weight threshold to consider for transfer.")]
-        [Range(0f, 1f)]
-        public float minWeightThreshold = 0.0f;
+        [FormerlySerializedAs("weightTransferSourceMesh")]
+        [SerializeField, HideInInspector] public SkinnedMeshRenderer legacyWeightTransferSourceMesh;
 
-        [Tooltip("Use smart weight transfer that considers mesh topology similarity.")]
-        public bool useSmartWeightTransfer = true;
+        [FormerlySerializedAs("weightTransferTargetMesh")]
+        [SerializeField, HideInInspector] public SkinnedMeshRenderer legacyWeightTransferTargetMesh;
 
-        [Header("Blend Shape Generation (Create Frames)")]
-        [Tooltip("List of blend shape generation tasks to execute.")]
-        public List<BlendShapeGenerationTask> generationTasks = new List<BlendShapeGenerationTask>();
+        [FormerlySerializedAs("matchByName")]
+        [SerializeField, HideInInspector] public bool legacyMatchByName = true;
+
+        [FormerlySerializedAs("minWeightThreshold")]
+        [SerializeField, HideInInspector] public float legacyMinWeightThreshold = 0.0f;
+
+        [FormerlySerializedAs("useSmartWeightTransfer")]
+        [SerializeField, HideInInspector] public bool legacyUseSmartWeightTransfer = true;
+
+        [FormerlySerializedAs("generationTasks")]
+        [SerializeField, HideInInspector] public List<BlendShapeGenerationTask> legacyGenerationTasks = new List<BlendShapeGenerationTask>();
+
+        public void EnsureMigrated()
+        {
+            if (tasks != null && tasks.Count > 0) return;
+
+            bool hasLegacyWeight = legacyEnableWeightTransfer;
+            bool hasLegacyGeneration = legacyGenerationTasks != null && legacyGenerationTasks.Count > 0;
+            if (!hasLegacyWeight && !hasLegacyGeneration) return;
+
+            if (tasks == null) tasks = new List<BlendShapeTransferTask>();
+
+            if (hasLegacyWeight)
+            {
+                tasks.Add(new BlendShapeTransferTask
+                {
+                    enabled = true,
+                    direction = legacyWeightTransferDirection,
+                    enableWeightTransfer = true,
+                    weightTransferSourceMesh = legacyWeightTransferSourceMesh,
+                    weightTransferTargetMesh = legacyWeightTransferTargetMesh,
+                    matchByName = legacyMatchByName,
+                    minWeightThreshold = legacyMinWeightThreshold,
+                    useSmartWeightTransfer = legacyUseSmartWeightTransfer,
+                    enableGeneration = false
+                });
+            }
+
+            if (hasLegacyGeneration)
+            {
+                foreach (var legacyTask in legacyGenerationTasks)
+                {
+                    if (legacyTask == null) continue;
+                    legacyTask.enableGeneration = true;
+                    if (legacyTask.direction == BlendShapeTransferDirection.OutfitToBase)
+                        legacyTask.direction = legacyWeightTransferDirection;
+                    tasks.Add(legacyTask);
+                }
+            }
+        }
     }
 
     public enum BlendShapeTransferMode
     {
-        CopyWeightsOnly = 0,
-        TransferFramesApproximate = 1
+        [InspectorName("Approximate (Nearest Vertex)")]
+        TransferFramesApproximate = 0,
+
+        [InspectorName("K-Nearest Blended")]
+        TransferFramesKNearestBlended = 1,
+
+        [InspectorName("Bounds Normalized Nearest")]
+        TransferFramesBoundsNormalized = 2
     }
 
     public enum BlendShapeTransferDirection
@@ -134,7 +228,59 @@ namespace NDMFMerge.Runtime
         BaseToOutfit = 1,
 
         [InspectorName("Both Directions")]
-        Bidirectional = 2
+        Bidirectional = 2,
+
+        [InspectorName("Mesh → Mesh")]
+        MeshToMesh = 3
+    }
+
+    public enum OutfitMergeMode
+    {
+        [InspectorName("Armature Mode")]
+        Armature = 0,
+
+        [InspectorName("Object Mode")]
+        Object = 1
+    }
+
+    public enum ObjectPlacementMode
+    {
+        [InspectorName("Place Under Selected GameObject")]
+        PlaceUnderSelectedGameObject = 0,
+
+        [InspectorName("Weight Meshes At Current Position To Target Bone")]
+        WeightMeshesToTargetBoneAtCurrentPosition = 1,
+
+        [InspectorName("Place Using Reference")]
+        PlaceUsingReference = 2,
+
+        [InspectorName("Place Using Values")]
+        PlaceUsingValues = 3
+    }
+
+    [Serializable]
+    public class ObjectMergeSettings
+    {
+        [Tooltip("How objects are positioned when merged in Object mode.")]
+        public ObjectPlacementMode placementMode = ObjectPlacementMode.PlaceUsingValues;
+
+        [Tooltip("Target object on the base avatar where this outfit/object will be parented.")]
+        public Transform targetParent;
+
+        [Tooltip("Target bone used by the weighting placement mode.")]
+        public Transform targetBone;
+
+        [Tooltip("Reference object used by reference placement mode.")]
+        public Transform referenceTransform;
+
+        [Tooltip("Local position offset applied after parenting in Object mode.")]
+        public Vector3 localPositionOffset = Vector3.zero;
+
+        [Tooltip("Local rotation offset in degrees applied after parenting in Object mode.")]
+        public Vector3 localRotationOffset = Vector3.zero;
+
+        [Tooltip("Local scale multiplier applied after parenting in Object mode.")]
+        public Vector3 localScaleOffset = Vector3.one;
     }
 
     [Serializable]
@@ -299,6 +445,12 @@ namespace NDMFMerge.Runtime
 
         [Tooltip("The outfit/armature GameObject to merge")]
         public GameObject outfit;
+
+        [Tooltip("How this entry should be merged.")]
+        public OutfitMergeMode mergeMode = OutfitMergeMode.Armature;
+
+        [Tooltip("Settings used when this entry is in Object mode.")]
+        public ObjectMergeSettings objectMergeSettings = new ObjectMergeSettings();
 
         [Tooltip("Prefix to remove from bone names when matching")]
         public string prefix = "";
