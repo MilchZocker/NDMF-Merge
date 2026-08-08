@@ -15,7 +15,22 @@ jobs:
 
       - name: Extract version from tag
         id: tag
-        run: echo "name=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: |
+          echo "name=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        
+      - name: Update package version
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          pkg_path = pathlib.Path('packages/NDMF-Merge/package.json')
+          data = json.loads(pkg_path.read_text(encoding='utf-8'))
+          data['version'] = os.environ['TAG_NAME']
+          pkg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+          PY
+        env:
+          TAG_NAME: ${{ steps.tag.outputs.name }}
 
       - name: Create UPM Branch
         uses: hecomi/create-upm-branch-action@main
