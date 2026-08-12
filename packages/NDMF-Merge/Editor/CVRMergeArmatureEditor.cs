@@ -17,10 +17,11 @@ namespace NDMFMerge.Editor
         private bool showGlobalBoneMatching = false;
         private bool showAnimatorImprovements = false;
         private bool showGlobalDefaults = false;
+        private bool showArmatureMerging = true;
         
         // Tools & Validation section foldouts
+        private bool showBlendShapeTransfer = true;
         private bool showMeshUVTools = false;
-        private bool showBlendShapeTools = false;
         private bool showBoneChainValidation = false;
         private bool showPrePostValidation = false;
         
@@ -75,9 +76,13 @@ namespace NDMFMerge.Editor
             EditorGUILayout.Space(2);
             DrawGlobalOutfitDefaultsSection();
             EditorGUILayout.Space(3);
+            DrawRootLoggingSection();
+            EditorGUILayout.Space(3);
             DrawGlobalBoneMatchingSection();
             EditorGUILayout.Space(3);
             DrawAnimatorImprovementsSection();
+            EditorGUILayout.Space(3);
+            DrawArmatureMergingSection();
 
             EditorGUILayout.Space(10);
 
@@ -91,6 +96,8 @@ namespace NDMFMerge.Editor
             // SECTION 4: Advanced Tools
             DrawSectionHeader("🔧 Advanced Tools");
             EditorGUILayout.Space(2);
+            DrawBlendShapeTransferSection(merger);
+            EditorGUILayout.Space(3);
             DrawToolsAndValidationSections();
 
             EditorGUILayout.Space(10);
@@ -407,12 +414,29 @@ namespace NDMFMerge.Editor
                 
                 // Semantic Bone Matching
                 EditorGUILayout.LabelField("Semantic Matching", EditorStyles.boldLabel);
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("semanticBoneMatchingSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("semanticBoneMatchingSettings"), new GUIContent("Semantic Settings"), true);
                 
                 EditorGUI.indentLevel--;
                 EditorGUILayout.Space(2);
             }
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawRootLoggingSection()
+        {
+            var originalColor = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.96f, 0.98f, 1f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = originalColor;
+
+            EditorGUILayout.LabelField("Log Output", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(
+                serializedObject.FindProperty("loggingLevel"),
+                new GUIContent("Logging", "Choose which severities are written to the merge log."));
+            EditorGUILayout.PropertyField(
+                serializedObject.FindProperty("verboseMode"),
+                new GUIContent("Verbose Logging", "Simple keeps logs concise. Detailed enables deep debug output across all operations."));
 
             EditorGUILayout.EndVertical();
         }
@@ -684,7 +708,7 @@ namespace NDMFMerge.Editor
                         }
                         else if (currentRes == BoneConflictResolution.ConstraintToTarget)
                         {
-                            EditorGUILayout.HelpBox("Bone stays separate, follows target via constraint.", MessageType.Info);
+                            EditorGUILayout.HelpBox("Bone stays weighted and becomes a child of the target while preserving its current world position/rotation/scale.", MessageType.Info);
                         }
 
                         EditorGUILayout.EndVertical();
@@ -706,7 +730,7 @@ namespace NDMFMerge.Editor
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField("Bulk Actions:", EditorStyles.miniLabel, GUILayout.Width(75));
             
-            if (GUILayout.Button("Constraint All", EditorStyles.miniButtonLeft, GUILayout.Height(20))) 
+            if (GUILayout.Button("As Child All", EditorStyles.miniButtonLeft, GUILayout.Height(20))) 
             {
                 SetAllResolutions(merger, BoneConflictResolution.ConstraintToTarget);
                 statsNeedUpdate = true;
@@ -731,6 +755,87 @@ namespace NDMFMerge.Editor
             EditorUtility.SetDirty(merger);
         }
 
+        private void DrawArmatureMergingSection()
+        {
+            var originalColor = GUI.backgroundColor;
+            GUI.backgroundColor = sectionColor;
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = originalColor;
+
+            showArmatureMerging = EditorGUILayout.Foldout(showArmatureMerging, "Armature Merging", true, EditorStyles.foldoutHeader);
+            if (showArmatureMerging)
+            {
+                EditorGUILayout.Space(3);
+                EditorGUI.indentLevel++;
+
+                var armatureSettings = serializedObject.FindProperty("armatureMergingSettings");
+                if (armatureSettings == null)
+                {
+                    EditorGUILayout.HelpBox("Armature merging settings could not be loaded. Try reimporting scripts.", MessageType.Warning);
+                }
+                else
+                {
+                    EditorGUILayout.PropertyField(
+                        armatureSettings.FindPropertyRelative("enableScaleNormalization"),
+                        new GUIContent("Enable Scale Normalization", "Enable transform normalization before armature merge to reduce distortion and exploding meshes."));
+
+                    if (armatureSettings.FindPropertyRelative("enableScaleNormalization").boolValue)
+                    {
+                        EditorGUI.indentLevel++;
+                        EditorGUILayout.PropertyField(
+                            armatureSettings.FindPropertyRelative("normalizationScope"),
+                            new GUIContent("Normalization Scope", "Apply normalization to outfit clones only, or also to the base avatar armature during the build."));
+                        EditorGUILayout.PropertyField(
+                            armatureSettings.FindPropertyRelative("normalizationMode"),
+                            new GUIContent("Normalization Mode", "Scale Only: bake local scale into children. Apply Transform-Like: bake local position/rotation/scale into descendants and non-skinned mesh data."));
+                        EditorGUILayout.PropertyField(
+                            armatureSettings.FindPropertyRelative("applyScaleToAllTransforms"),
+                            new GUIContent("Apply Scale To All Transforms", "Bake scale through the full hierarchy (including bones and non-mesh objects) so the avatar keeps the same world appearance."));
+                        EditorGUILayout.PropertyField(
+                            armatureSettings.FindPropertyRelative("protectSkinnedSkeleton"),
+                            new GUIContent("Protect Skinned Skeleton", "When enabled, bone chains used by skinned meshes are excluded from normalization to avoid skinning drift."));
+
+                        var modeProp = armatureSettings.FindPropertyRelative("normalizationMode");
+                        if (modeProp != null && modeProp.enumValueIndex == (int)ArmatureScaleNormalizationMode.ApplyTransformLike)
+                        {
+                            EditorGUILayout.Space(3);
+                            EditorGUILayout.LabelField("Apply Transform-Like Mesh Bake", EditorStyles.miniBoldLabel);
+                            EditorGUILayout.PropertyField(
+                                armatureSettings.FindPropertyRelative("applyPositionToStaticMeshes"),
+                                new GUIContent("Apply Position To Static Meshes", "Bake local position into MeshFilter meshes, then reset mesh transform position."));
+                            EditorGUILayout.PropertyField(
+                                armatureSettings.FindPropertyRelative("applyRotationToStaticMeshes"),
+                                new GUIContent("Apply Rotation To Static Meshes", "Bake local rotation into MeshFilter meshes, then reset mesh transform rotation."));
+                            EditorGUILayout.PropertyField(
+                                armatureSettings.FindPropertyRelative("applyPositionToSkinnedMeshes"),
+                                new GUIContent("Apply Position To Skinned Meshes", "Bake local position into skinned meshes and adjust bindposes so deformations remain stable."));
+                            EditorGUILayout.PropertyField(
+                                armatureSettings.FindPropertyRelative("applyRotationToSkinnedMeshes"),
+                                new GUIContent("Apply Rotation To Skinned Meshes", "Bake local rotation into skinned meshes and adjust bindposes so deformations remain stable."));
+                        }
+                        EditorGUI.indentLevel--;
+                    }
+
+                    EditorGUILayout.Space(4);
+                    EditorGUILayout.PropertyField(
+                        armatureSettings.FindPropertyRelative("compensateBindposesOnBoneRemap"),
+                        new GUIContent("Compensate Bindposes On Bone Remap", "Bake source-to-target deltas into bindposes when bones are remapped, preserving mesh deformation."));
+                    if (armatureSettings.FindPropertyRelative("compensateBindposesOnBoneRemap").boolValue)
+                    {
+                        EditorGUI.indentLevel++;
+                        EditorGUILayout.PropertyField(
+                            armatureSettings.FindPropertyRelative("compensateAutoMappedBones"),
+                            new GUIContent("Compensate Auto-Mapped Bones", "Apply bindpose compensation to fuzzy/name-based remaps in addition to explicit conflict mappings."));
+                        EditorGUI.indentLevel--;
+                    }
+                }
+
+                EditorGUI.indentLevel--;
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
         private void DrawAdvancedSettings(CVRMergeArmature merger)
         {
             var originalColor = GUI.backgroundColor;
@@ -745,19 +850,12 @@ namespace NDMFMerge.Editor
                 EditorGUILayout.Space(3);
                 EditorGUI.indentLevel++;
 
-                // Debug & Logging Section
-                DrawSubsectionLabel("Debug & Logging");
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("verboseLogging"), new GUIContent("Enable Verbose Logging", "Enable detailed logging for all merge operations."));
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("logLevel"), new GUIContent("Log Level", "0=Errors Only, 1=Warnings+Errors, 2=All Details"));
-                EditorGUILayout.Space(8);
-
                 DrawSubsectionLabel("Exclusions");
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("excludedTransforms"), new GUIContent("Excluded Transforms"), true);
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("excludedNamePatterns"), new GUIContent("Excluded Name Patterns"), true);
 
                 EditorGUILayout.Space(8);
                 DrawSubsectionLabel("Safety & Components");
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("preventScaleDistortion"), new GUIContent("Prevent Scale Distortion"));
                 EditorGUI.BeginChangeCheck();
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("mergeDynamicBones"), new GUIContent("Merge DynamicBones"));
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("mergeMagicaCloth"), new GUIContent("Merge Magica Cloth"));
@@ -789,6 +887,23 @@ namespace NDMFMerge.Editor
 
                 EditorGUI.indentLevel--;
                 EditorGUILayout.Space(2);
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawBlendShapeTransferSection(CVRMergeArmature merger)
+        {
+            var originalColor = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(1f, 0.97f, 0.92f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = originalColor;
+
+            showBlendShapeTransfer = EditorGUILayout.Foldout(showBlendShapeTransfer, "😊 BlendShape Transfer", true, EditorStyles.foldoutHeader);
+            if (showBlendShapeTransfer)
+            {
+                EditorGUILayout.Space(2);
+                DrawBlendShapeSettings(merger);
             }
 
             EditorGUILayout.EndVertical();
@@ -867,7 +982,7 @@ namespace NDMFMerge.Editor
             public int totalMeshes;
             public int totalMaterials;
             public int bonesToMerge;
-            public int bonesToConstrain;
+            public int bonesToReparent;
             public int bonesToRename;
             public int uniqueBonesToAdd;
             public int conflictsResolved;
@@ -987,7 +1102,7 @@ namespace NDMFMerge.Editor
                         }
                         else if (conflict.resolution == BoneConflictResolution.ConstraintToTarget)
                         {
-                            stats.bonesToConstrain++;
+                            stats.bonesToReparent++;
                             stats.conflictsResolved++;
                         }
                         else if (conflict.resolution == BoneConflictResolution.Rename)
@@ -1261,8 +1376,8 @@ namespace NDMFMerge.Editor
             EditorGUI.indentLevel++;
             EditorGUILayout.LabelField("• Bones to Merge:", $"{stats.bonesToMerge}");
             EditorGUILayout.LabelField("• Unique Bones to Add:", $"{stats.uniqueBonesToAdd}");
-            if (stats.bonesToConstrain > 0)
-                EditorGUILayout.LabelField("• Bones to Constrain:", $"{stats.bonesToConstrain}");
+            if (stats.bonesToReparent > 0)
+                EditorGUILayout.LabelField("• Bones to reparent:", $"{stats.bonesToReparent}");
             if (stats.bonesToRename > 0)
                 EditorGUILayout.LabelField("• Bones to Rename:", $"{stats.bonesToRename}");
             EditorGUI.indentLevel--;
@@ -1797,7 +1912,7 @@ namespace NDMFMerge.Editor
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             GUI.backgroundColor = originalColor;
 
-            bool anyToolsOpen = showMeshUVTools || showBlendShapeTools || showBoneChainValidation || showPrePostValidation;
+            bool anyToolsOpen = showMeshUVTools || showBoneChainValidation || showPrePostValidation;
             showAllTools = EditorGUILayout.Foldout(
                 showAllTools || anyToolsOpen,
                 "🔧 Mesh, UV & Validation Tools",
@@ -1811,10 +1926,6 @@ namespace NDMFMerge.Editor
 
                 DrawToolSubsection(ref showMeshUVTools, "🎨 Mesh & Material Tools", () =>
                 {
-                    // Single verbose logging for UV + Material Consolidation
-                    EditorGUILayout.PropertyField(serializedObject.FindProperty("uvValidationSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
-                    EditorGUILayout.Space(2);
-
                     DrawSubsectionLabel("UV Validation");
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("uvValidationSettings.fillMissingUVs"));
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("uvValidationSettings.autoFixOverlapping"));
@@ -1834,18 +1945,8 @@ namespace NDMFMerge.Editor
 
                 EditorGUILayout.Space(3);
 
-                DrawToolSubsection(ref showBlendShapeTools, "😊 BlendShape Transfer", () =>
-                {
-                    EditorGUILayout.PropertyField(serializedObject.FindProperty("blendShapeTransferSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
-                    DrawBlendShapeSettings((CVRMergeArmature)target);
-                });
-
-                EditorGUILayout.Space(3);
-
                 DrawToolSubsection(ref showBoneChainValidation, "🔗 Bone Chain Validation", () =>
                 {
-                    EditorGUILayout.PropertyField(serializedObject.FindProperty("boneChainValidationSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
-                    EditorGUILayout.Space(2);
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("boneChainValidationSettings.enable"));
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("boneChainValidationSettings.warnOnMissing"));
                 });
@@ -1854,9 +1955,6 @@ namespace NDMFMerge.Editor
 
                 DrawToolSubsection(ref showPrePostValidation, "✅ Pre/Post Merge Validation", () =>
                 {
-                    EditorGUILayout.PropertyField(serializedObject.FindProperty("preMergeValidationSettings.verboseLogging"), new GUIContent("Enable Verbose Logging"), false);
-                    EditorGUILayout.Space(2);
-
                     DrawSubsectionLabel("Pre-Merge Validation");
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("preMergeValidationSettings.checkMissingBones"));
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("preMergeValidationSettings.checkMeshIntegrity"));

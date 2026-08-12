@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -31,6 +31,23 @@ namespace NDMFMerge.Editor
         private StringBuilder mergeLog = new StringBuilder();
         private static readonly HashSet<int> _aasGeneratedForAvatarInstance = new HashSet<int>();
         private static readonly Dictionary<string, Type> _typeCache = new Dictionary<string, Type>();
+
+        private static bool ShouldLogWarnings(CVRMergeArmature merger)
+        {
+            return merger != null && merger.loggingLevel != MergeLoggingLevel.ErrorsOnly;
+        }
+
+        private static bool ShouldLogInfo(CVRMergeArmature merger)
+        {
+            return merger != null && merger.loggingLevel == MergeLoggingLevel.AllDetails;
+        }
+
+        private static bool ShouldLogDetailed(CVRMergeArmature merger)
+        {
+            return merger != null
+                   && merger.loggingLevel == MergeLoggingLevel.AllDetails
+                   && merger.verboseMode == MergeVerboseMode.Detailed;
+        }
 
         // ========================================
         // CVR REFLECTION HELPER METHODS (EMBEDDED)
@@ -130,8 +147,6 @@ namespace NDMFMerge.Editor
                         }
                     }
 
-                    mergeLog.AppendLine("========== END MERGE LOG ==========");
-                    Debug.Log(mergeLog.ToString());
                 });
 
             InPhase(BuildPhase.Transforming)
@@ -176,6 +191,7 @@ namespace NDMFMerge.Editor
                         foreach (var merger in mergeComponents)
                             if (merger != null) UnityEngine.Object.DestroyImmediate(merger);
 
+                        mergeLog.AppendLine("========== END MERGE LOG ==========");
                         Debug.Log(mergeLog.ToString());
                     }
                     finally
@@ -190,6 +206,7 @@ namespace NDMFMerge.Editor
         {
             var cvrAvatar = merger.GetCVRAvatar();
             if (cvrAvatar == null) { mergeLog.AppendLine("ERROR: No CVRAvatar found on avatar!"); return; }
+            var clipReplacementMap = new Dictionary<AnimationClip, AnimationClip>();
 
             Transform targetArmature = FindArmatureFromCVRAvatar(cvrAvatar);
             bool hasArmatureModeOutfits = merger.outfitsToMerge != null && merger.outfitsToMerge.Any(o => o != null && o.outfit != null && o.mergeMode == OutfitMergeMode.Armature);
@@ -199,14 +216,23 @@ namespace NDMFMerge.Editor
                 return;
             }
 
-            if (targetArmature != null && (merger.verboseLogging || merger.logLevel >= 2))
+            if (targetArmature != null && ShouldLogInfo(merger))
                 mergeLog.AppendLine($"Target armature: {targetArmature.name}");
+
+            var armatureSettings = GetArmatureMergingSettings(merger);
+            if (targetArmature != null &&
+                armatureSettings.enableScaleNormalization &&
+                armatureSettings.normalizationScope == ArmatureScaleNormalizationScope.BaseAndOutfits)
+            {
+                NormalizeTransformsBeforeMerge(targetArmature, merger, armatureSettings, "base armature", ctx.AvatarRootTransform);
+            }
 
             // Per-outfit bounds reference will be selected individually (CopyFromSelected)
             SkinnedMeshRenderer bodyReferenceMesh = null;
 
             var clonedOutfits = new List<Transform>();
             var clonedOutfitByEntry = new Dictionary<OutfitToMerge, Transform>();
+            var mergedBoneReferences = new Dictionary<int, Transform>();
 
             foreach (var outfitEntry in merger.outfitsToMerge)
             {
@@ -222,17 +248,14 @@ namespace NDMFMerge.Editor
                     if (outfitEntry.forceScaleToOne)
                     {
                         clonedOutfit.transform.localScale = Vector3.one;
-                        if (merger.verboseLogging || merger.logLevel >= 2)
+                        if (ShouldLogInfo(merger))
                             mergeLog.AppendLine($"  Forced outfit root scale to (1,1,1)");
                     }
 
-                    // [NEW FEATURE] Normalize scales to prevent distortion
-                    if (merger.preventScaleDistortion)
-                    {
-                        NormalizeScalesBeforeMerge(clonedOutfit.transform, merger);
-                    }
+                    if (armatureSettings.enableScaleNormalization)
+                        NormalizeTransformsBeforeMerge(clonedOutfit.transform, merger, armatureSettings, "outfit", clonedOutfit.transform);
 
-                    if (merger.verboseLogging || merger.logLevel >= 2)
+                    if (ShouldLogInfo(merger))
                         mergeLog.AppendLine($"\n--- Merging outfit: {clonedOutfit.name} ---");
                     clonedOutfits.Add(clonedOutfit.transform);
                     clonedOutfitByEntry[outfitEntry] = clonedOutfit.transform;
@@ -243,7 +266,7 @@ namespace NDMFMerge.Editor
                     }
                     else
                     {
-                        MergeOutfitWithoutDestroy(ctx, merger, outfitEntry, clonedOutfit.transform, targetArmature, bodyReferenceMesh, clonedOutfitByEntry);
+                        MergeOutfitWithoutDestroy(ctx, merger, outfitEntry, clonedOutfit.transform, targetArmature, bodyReferenceMesh, clonedOutfitByEntry, mergedBoneReferences, clipReplacementMap);
                     }
                 }
                 catch (Exception ex)
@@ -258,7 +281,7 @@ namespace NDMFMerge.Editor
                 var clonedCVRAvatar = ctx.AvatarRootTransform.GetComponentInChildren(cvrAvatar.GetType(), true);
                 if (clonedCVRAvatar != null)
                 {
-                    if (merger.verboseLogging || merger.logLevel >= 2)
+                    if (ShouldLogInfo(merger))
                         mergeLog.AppendLine($"\n--- Merging Advanced Avatar Settings from {clonedOutfits.Count} outfits ---");
                     foreach (var outfitRoot in clonedOutfits)
                     {
@@ -290,12 +313,23 @@ namespace NDMFMerge.Editor
             foreach (var outfitRoot in clonedOutfits)
                 if (outfitRoot != null) UnityEngine.Object.DestroyImmediate(outfitRoot.gameObject);
 
+            ApplyAnimationClipReplacementsInClone(ctx.AvatarRootTransform, clipReplacementMap, merger);
+
             try
             {
-                RemapExternalReferencesUniversal(ctx.AvatarRootTransform, merger);
+                RemapExternalReferencesUniversal(ctx.AvatarRootTransform, merger, mergedBoneReferences);
+            }
+            catch (Exception ex)
+            {
+                mergeLog.AppendLine($"  ERROR in universal reference remap: {ex.Message}");
+                Debug.LogError($"[NDMF Merge] Universal reference remap failed: {ex.Message}\n{ex.StackTrace}");
+            }
+
+            try
+            {
                 RebuildMagicaData(ctx.AvatarRootTransform, merger);
-            if (merger.verboseLogging || merger.logLevel >= 2)
-                mergeLog.AppendLine("Post-merge finalization complete (universal external ref remap + Magica rebuild).");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine("Post-merge finalization complete (universal reference remap + Magica rebuild).");
                 // Post-merge verification
                 RunPostMergeVerification(ctx, merger, merger.postMergeVerificationSettings);
                 // Bone chain validation on final armature
@@ -308,29 +342,281 @@ namespace NDMFMerge.Editor
             }
         }
 
-        // [NEW FEATURE] Scale normalization to prevent exploding meshes
-        private void NormalizeScalesBeforeMerge(Transform root, CVRMergeArmature merger)
+        private static ArmatureMergingSettings GetArmatureMergingSettings(CVRMergeArmature merger)
         {
-            if (merger.verboseLogging && merger.logLevel >= 2)
-                mergeLog.AppendLine($"  [Scale Normalization] Starting: normalizing scales for '{root.name}'...");
-            
-            void RecursiveNormalize(Transform t)
+            return merger != null && merger.armatureMergingSettings != null
+                ? merger.armatureMergingSettings
+                : new ArmatureMergingSettings();
+        }
+
+        // [NEW FEATURE] Transform normalization to reduce distortion before merge.
+        private void NormalizeTransformsBeforeMerge(Transform root, CVRMergeArmature merger, ArmatureMergingSettings settings, string subjectLabel, Transform skinnedMeshSearchRoot = null)
+        {
+            if (root == null || settings == null) return;
+
+            if (ShouldLogInfo(merger))
             {
-                if (t.localScale != Vector3.one)
-                {
-                    // Apply scale to children positions
-                    foreach (Transform child in t)
-                    {
-                        child.localPosition = Vector3.Scale(child.localPosition, t.localScale);
-                    }
-                    t.localScale = Vector3.one;
-                }
-                foreach (Transform child in t) RecursiveNormalize(child);
+                mergeLog.AppendLine($"  [Scale Normalization] Starting ({settings.normalizationMode}) on {subjectLabel} '{root.name}'...");
+            }
+            if (ShouldLogDetailed(merger))
+            {
+                mergeLog.AppendLine($"  [Scale Normalization] Config: scaleAll={settings.applyScaleToAllTransforms}, protectSkeleton={settings.protectSkinnedSkeleton}, posStatic={settings.applyPositionToStaticMeshes}, rotStatic={settings.applyRotationToStaticMeshes}, posSkinned={settings.applyPositionToSkinnedMeshes}, rotSkinned={settings.applyRotationToSkinnedMeshes}");
             }
 
-            RecursiveNormalize(root);
-            if (merger.verboseLogging && merger.logLevel >= 2)
-                mergeLog.AppendLine("  [Scale Normalization] Complete: applied scale normalization to prevent distortion");
+            var protectedTransforms = settings.protectSkinnedSkeleton
+                ? BuildProtectedSkeletonTransforms(root, skinnedMeshSearchRoot ?? root)
+                : new HashSet<Transform>();
+
+            int scaledCount = 0;
+            int skippedProtectedScaleCount = 0;
+            int bakedStaticMeshCount = 0;
+            int bakedSkinnedMeshCount = 0;
+            int resetTransformCount = 0;
+
+            bool isApplyMode = settings.normalizationMode == ArmatureScaleNormalizationMode.ApplyTransformLike;
+
+            void RecursiveScaleNormalize(Transform t)
+            {
+                bool isProtected = protectedTransforms.Contains(t);
+                if (t.localScale != Vector3.one)
+                {
+                    bool skipProtectedScale = isProtected && settings.protectSkinnedSkeleton && !settings.applyScaleToAllTransforms;
+                    if (skipProtectedScale)
+                    {
+                        skippedProtectedScaleCount++;
+                    }
+                    else
+                    {
+                        var localScale = t.localScale;
+                        foreach (Transform child in t)
+                        {
+                            child.localPosition = Vector3.Scale(child.localPosition, localScale);
+                            child.localScale = Vector3.Scale(localScale, child.localScale);
+                        }
+                        t.localScale = Vector3.one;
+                        scaledCount++;
+                    }
+                }
+
+                foreach (Transform child in t) RecursiveScaleNormalize(child);
+            }
+
+            bool BakeMeshTransformsOnNode(Transform t)
+            {
+                if (t == null) return false;
+
+                var meshFilter = t.GetComponent<MeshFilter>();
+                var skinnedMesh = t.GetComponent<SkinnedMeshRenderer>();
+                bool hasStaticMesh = meshFilter != null && meshFilter.sharedMesh != null;
+                bool hasSkinnedMesh = skinnedMesh != null && skinnedMesh.sharedMesh != null;
+
+                if (!hasStaticMesh && !hasSkinnedMesh) return false;
+
+                bool applyPos = (hasStaticMesh && settings.applyPositionToStaticMeshes) || (hasSkinnedMesh && settings.applyPositionToSkinnedMeshes);
+                bool applyRot = (hasStaticMesh && settings.applyRotationToStaticMeshes) || (hasSkinnedMesh && settings.applyRotationToSkinnedMeshes);
+                bool applyScale = false;
+
+                if (!applyPos && !applyRot && !applyScale) return false;
+
+                var localPosition = applyPos ? t.localPosition : Vector3.zero;
+                var localRotation = applyRot ? t.localRotation : Quaternion.identity;
+                var localScale = applyScale ? t.localScale : Vector3.one;
+
+                var bakeMatrix = Matrix4x4.TRS(localPosition, localRotation, localScale);
+                if (bakeMatrix == Matrix4x4.identity) return false;
+
+                bool bakedAny = false;
+                if (hasStaticMesh && (settings.applyPositionToStaticMeshes || settings.applyRotationToStaticMeshes))
+                {
+                    if (BakeMeshFilterTransform(t, bakeMatrix))
+                    {
+                        bakedStaticMeshCount++;
+                        bakedAny = true;
+                    }
+                }
+
+                if (hasSkinnedMesh && (settings.applyPositionToSkinnedMeshes || settings.applyRotationToSkinnedMeshes))
+                {
+                    if (BakeSkinnedMeshTransform(skinnedMesh, bakeMatrix))
+                    {
+                        bakedSkinnedMeshCount++;
+                        bakedAny = true;
+                    }
+                }
+
+                if (!bakedAny) return false;
+
+                ApplySelectedLocalTransformToChildren(t, localPosition, localRotation, localScale, applyPos, applyRot, applyScale);
+
+                if (applyPos) t.localPosition = Vector3.zero;
+                if (applyRot) t.localRotation = Quaternion.identity;
+                if (applyScale) t.localScale = Vector3.one;
+
+                resetTransformCount++;
+                return true;
+            }
+
+            void RecursiveBakeMeshTransforms(Transform t)
+            {
+                BakeMeshTransformsOnNode(t);
+                foreach (Transform child in t) RecursiveBakeMeshTransforms(child);
+            }
+
+            RecursiveScaleNormalize(root);
+            if (isApplyMode)
+                RecursiveBakeMeshTransforms(root);
+
+            if (ShouldLogInfo(merger))
+            {
+                mergeLog.AppendLine($"  [Scale Normalization] Complete: scaled {scaledCount} transform(s), skipped {skippedProtectedScaleCount} protected skeleton transform(s)");
+                if (isApplyMode)
+                    mergeLog.AppendLine($"  [Scale Normalization] Apply Transform-like: baked static={bakedStaticMeshCount}, skinned={bakedSkinnedMeshCount}, resetTransforms={resetTransformCount}");
+            }
+        }
+
+        private static void ApplySelectedLocalTransformToChildren(
+            Transform t,
+            Vector3 localPosition,
+            Quaternion localRotation,
+            Vector3 localScale,
+            bool applyPosition,
+            bool applyRotation,
+            bool applyScale)
+        {
+            if (t == null) return;
+
+            var matrix = Matrix4x4.TRS(
+                applyPosition ? localPosition : Vector3.zero,
+                applyRotation ? localRotation : Quaternion.identity,
+                applyScale ? localScale : Vector3.one);
+
+            foreach (Transform child in t)
+            {
+                child.localPosition = matrix.MultiplyPoint3x4(child.localPosition);
+                if (applyRotation)
+                    child.localRotation = localRotation * child.localRotation;
+                if (applyScale)
+                    child.localScale = Vector3.Scale(localScale, child.localScale);
+            }
+        }
+
+        private static HashSet<Transform> BuildProtectedSkeletonTransforms(Transform normalizeRoot, Transform skinnedMeshSearchRoot)
+        {
+            var protectedTransforms = new HashSet<Transform>();
+            if (normalizeRoot == null || skinnedMeshSearchRoot == null) return protectedTransforms;
+
+            var skinnedMeshes = skinnedMeshSearchRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            foreach (var smr in skinnedMeshes)
+            {
+                if (smr == null || smr.bones == null) continue;
+                foreach (var bone in smr.bones)
+                {
+                    if (bone == null) continue;
+
+                    // Only protect bones that are actually inside the normalization subtree.
+                    if (!bone.IsChildOf(normalizeRoot) && bone != normalizeRoot)
+                        continue;
+
+                    var current = bone;
+                    while (current != null)
+                    {
+                        if (!protectedTransforms.Add(current)) break;
+                        if (current == normalizeRoot) break;
+                        current = current.parent;
+                    }
+                }
+            }
+
+            return protectedTransforms;
+        }
+
+        private bool BakeMeshFilterTransform(Transform t, Matrix4x4 localMatrix)
+        {
+            if (t == null) return false;
+            var meshFilter = t.GetComponent<MeshFilter>();
+            if (meshFilter == null || meshFilter.sharedMesh == null) return false;
+
+            var mesh = EnsureSceneMeshInstance(meshFilter, "NDMF Apply Transform");
+            if (mesh == null) return false;
+
+            var vertices = mesh.vertices;
+            if (vertices == null || vertices.Length == 0) return false;
+
+            var normalMatrix = localMatrix.inverse.transpose;
+            for (int i = 0; i < vertices.Length; i++)
+                vertices[i] = localMatrix.MultiplyPoint3x4(vertices[i]);
+            mesh.vertices = vertices;
+
+            var normals = mesh.normals;
+            if (normals != null && normals.Length == vertices.Length)
+            {
+                for (int i = 0; i < normals.Length; i++)
+                    normals[i] = normalMatrix.MultiplyVector(normals[i]).normalized;
+                mesh.normals = normals;
+            }
+
+            var tangents = mesh.tangents;
+            if (tangents != null && tangents.Length == vertices.Length)
+            {
+                for (int i = 0; i < tangents.Length; i++)
+                {
+                    var tangent = new Vector3(tangents[i].x, tangents[i].y, tangents[i].z);
+                    tangent = normalMatrix.MultiplyVector(tangent).normalized;
+                    tangents[i] = new Vector4(tangent.x, tangent.y, tangent.z, tangents[i].w);
+                }
+                mesh.tangents = tangents;
+            }
+
+            mesh.RecalculateBounds();
+            return true;
+        }
+
+        private bool BakeSkinnedMeshTransform(SkinnedMeshRenderer smr, Matrix4x4 localMatrix)
+        {
+            if (smr == null || smr.sharedMesh == null) return false;
+
+            var mesh = EnsureSceneMeshInstance(smr, "NDMF Apply Transform");
+            if (mesh == null) return false;
+
+            var vertices = mesh.vertices;
+            if (vertices == null || vertices.Length == 0) return false;
+
+            var normalMatrix = localMatrix.inverse.transpose;
+            for (int i = 0; i < vertices.Length; i++)
+                vertices[i] = localMatrix.MultiplyPoint3x4(vertices[i]);
+            mesh.vertices = vertices;
+
+            var normals = mesh.normals;
+            if (normals != null && normals.Length == vertices.Length)
+            {
+                for (int i = 0; i < normals.Length; i++)
+                    normals[i] = normalMatrix.MultiplyVector(normals[i]).normalized;
+                mesh.normals = normals;
+            }
+
+            var tangents = mesh.tangents;
+            if (tangents != null && tangents.Length == vertices.Length)
+            {
+                for (int i = 0; i < tangents.Length; i++)
+                {
+                    var tangent = new Vector3(tangents[i].x, tangents[i].y, tangents[i].z);
+                    tangent = normalMatrix.MultiplyVector(tangent).normalized;
+                    tangents[i] = new Vector4(tangent.x, tangent.y, tangent.z, tangents[i].w);
+                }
+                mesh.tangents = tangents;
+            }
+
+            var bindposes = mesh.bindposes;
+            if (bindposes != null && bindposes.Length > 0)
+            {
+                var invBake = localMatrix.inverse;
+                for (int i = 0; i < bindposes.Length; i++)
+                    bindposes[i] = bindposes[i] * invBake;
+                mesh.bindposes = bindposes;
+            }
+
+            mesh.RecalculateBounds();
+            return true;
         }
 
         // [NEW FEATURE] Find body mesh for bounds copying
@@ -338,7 +624,7 @@ namespace NDMFMerge.Editor
         {
             var smrs = targetArmature.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             var result = smrs.OrderByDescending(s => s.sharedMesh != null ? s.sharedMesh.vertexCount : 0).FirstOrDefault();
-            if (merger != null && merger.verboseLogging && merger.logLevel >= 2 && result != null)
+            if (merger != null && ShouldLogDetailed(merger) && result != null)
                 mergeLog.AppendLine($"  [Body Reference] Found body mesh '{result.name}' with {result.sharedMesh?.vertexCount ?? 0} vertices");
             return result;
         }
@@ -346,12 +632,12 @@ namespace NDMFMerge.Editor
         // ============================================================
         // UNIVERSAL POST-MERGE REMAPPER (Serialized + Reflection)
         // ============================================================
-        private void RemapExternalReferencesUniversal(Transform avatarRoot, CVRMergeArmature merger)
+        private void RemapExternalReferencesUniversal(Transform avatarRoot, CVRMergeArmature merger, Dictionary<int, Transform> mergedBoneReferences)
         {
             if (avatarRoot == null) return;
 
-            if (merger.verboseLogging || merger.logLevel >= 2)
-                mergeLog.AppendLine("Remapping ALL external references to NDMF clone (universal v2)...");
+            if (ShouldLogDetailed(merger))
+                mergeLog.AppendLine("Remapping scene references with bone-aware merge mapping (universal v3)...");
 
             var allComponents = avatarRoot.GetComponentsInChildren<Component>(true);
 
@@ -378,15 +664,7 @@ namespace NDMFMerge.Editor
                             prop.propertyType != SerializedPropertyType.ExposedReference)
                             continue;
 
-                        UnityEngine.Object objRef = prop.objectReferenceValue;
-                        if (objRef == null) continue;
-
-                        if (!IsSceneObjectOutsideClone(objRef, avatarRoot, out var refTransform)) continue;
-
-                        var mappedTransform = TryResolveTransformInClone(avatarRoot, refTransform);
-
-                        UnityEngine.Object newObj = null;
-                        if (mappedTransform != null) newObj = ConvertMappedObject(objRef, mappedTransform);
+                        if (!TryResolveSerializedObjectReference(prop, avatarRoot, mergedBoneReferences, out var newObj)) continue;
 
                         if (newObj != null)
                         {
@@ -413,7 +691,7 @@ namespace NDMFMerge.Editor
                 try
                 {
                     var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
-                    if (ReflectionRemapObjectGraph(comp, avatarRoot, visited, ref reflectionRemapped, ref reflectionNulled))
+                    if (ReflectionRemapObjectGraph(comp, avatarRoot, mergedBoneReferences, visited, ref reflectionRemapped, ref reflectionNulled))
                     {
                         compChanged = true;
                         EditorUtility.SetDirty(comp);
@@ -424,7 +702,7 @@ namespace NDMFMerge.Editor
                 if (compChanged) changedComponents++;
             }
 
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine(
                     $"Universal ref remap done. Components changed: {changedComponents}.\n" +
                     $"  Serialized pass -> remapped: {serializedRemapped}, nulled: {serializedNulled}\n" +
@@ -446,6 +724,94 @@ namespace NDMFMerge.Editor
             return true;
         }
 
+        private bool TryResolveRemappedTransformReference(UnityEngine.Object objRef, Transform avatarRoot, Dictionary<int, Transform> mergedBoneReferences, out Transform mappedTransform)
+        {
+            mappedTransform = null;
+            if (objRef == null) return false;
+
+            if (TryResolveMergedBoneReference(objRef, objRef.GetInstanceID(), mergedBoneReferences, out mappedTransform))
+                return true;
+
+            if (!IsSceneObjectOutsideClone(objRef, avatarRoot, out var refTransform))
+                return false;
+
+            mappedTransform = TryResolveTransformInClone(avatarRoot, refTransform);
+            return true;
+        }
+
+        private bool TryResolveMergedBoneReference(UnityEngine.Object objRef, int sourceInstanceId, Dictionary<int, Transform> mergedBoneReferences, out Transform mappedTransform)
+        {
+            mappedTransform = null;
+            if (mergedBoneReferences == null || mergedBoneReferences.Count == 0) return false;
+
+            if (objRef != null)
+            {
+                int instanceId = objRef.GetInstanceID();
+                if (mergedBoneReferences.TryGetValue(instanceId, out mappedTransform) && mappedTransform != null)
+                    return true;
+            }
+
+            if (sourceInstanceId != 0 && mergedBoneReferences.TryGetValue(sourceInstanceId, out mappedTransform) && mappedTransform != null)
+                return true;
+
+            return false;
+        }
+
+        private bool TryResolveSerializedObjectReference(SerializedProperty prop, Transform avatarRoot, Dictionary<int, Transform> mergedBoneReferences, out UnityEngine.Object newObj)
+        {
+            newObj = null;
+            if (prop == null) return false;
+
+            var objRef = prop.objectReferenceValue;
+            int sourceInstanceId = prop.objectReferenceInstanceIDValue;
+
+            if (TryResolveMergedBoneReference(objRef, sourceInstanceId, mergedBoneReferences, out var mergedBone))
+            {
+                newObj = objRef != null ? ConvertMappedObject(objRef, mergedBone) : mergedBone;
+                return true;
+            }
+
+            if (objRef == null)
+                return false;
+
+            if (!IsSceneObjectOutsideClone(objRef, avatarRoot, out var refTransform))
+                return false;
+
+            var mappedTransform = TryResolveTransformInClone(avatarRoot, refTransform);
+            newObj = mappedTransform != null ? ConvertMappedObject(objRef, mappedTransform) : null;
+            return true;
+        }
+
+        private bool TryRemapSceneObjectReference(UnityEngine.Object objRef, Transform avatarRoot, Dictionary<int, Transform> mergedBoneReferences, out UnityEngine.Object newObj)
+        {
+            newObj = null;
+            if (objRef == null) return false;
+
+            if (TryResolveMergedBoneReference(objRef, objRef.GetInstanceID(), mergedBoneReferences, out var mergedBone))
+            {
+                newObj = ConvertMappedObject(objRef, mergedBone);
+                return true;
+            }
+
+            if (!IsSceneObjectOutsideClone(objRef, avatarRoot, out var refTransform))
+                return false;
+
+            var mappedTransform = TryResolveTransformInClone(avatarRoot, refTransform);
+            newObj = mappedTransform != null ? ConvertMappedObject(objRef, mappedTransform) : null;
+            return true;
+        }
+
+        private void RegisterMergedBoneReferences(Dictionary<Transform, Transform> boneMap, Dictionary<int, Transform> mergedBoneReferences)
+        {
+            if (boneMap == null || mergedBoneReferences == null) return;
+
+            foreach (var pair in boneMap)
+            {
+                if (pair.Key == null || pair.Value == null) continue;
+                mergedBoneReferences[pair.Key.GetInstanceID()] = pair.Value;
+            }
+        }
+
         private UnityEngine.Object ConvertMappedObject(UnityEngine.Object oldObj, Transform mappedTransform)
         {
             if (oldObj is GameObject) return mappedTransform.gameObject;
@@ -460,7 +826,7 @@ namespace NDMFMerge.Editor
             return null;
         }
 
-        private bool ReflectionRemapObjectGraph(object rootObj, Transform avatarRoot, HashSet<object> visited, ref int remappedCount, ref int nulledCount)
+        private bool ReflectionRemapObjectGraph(object rootObj, Transform avatarRoot, Dictionary<int, Transform> mergedBoneReferences, HashSet<object> visited, ref int remappedCount, ref int nulledCount)
         {
             if (rootObj == null || !visited.Add(rootObj)) return false;
 
@@ -476,11 +842,8 @@ namespace NDMFMerge.Editor
                     var item = list[i];
                     if (item == null) continue;
 
-                    if (item is UnityEngine.Object listObj && IsSceneObjectOutsideClone(listObj, avatarRoot, out var refT))
+                    if (item is UnityEngine.Object listObj && TryRemapSceneObjectReference(listObj, avatarRoot, mergedBoneReferences, out var newObj))
                     {
-                        var mappedT = TryResolveTransformInClone(avatarRoot, refT);
-                        var newObj = mappedT != null ? ConvertMappedObject(listObj, mappedT) : null;
-
                         if (newObj != null) { list[i] = newObj; remappedCount++; }
                         else { list[i] = null; nulledCount++; }
 
@@ -489,7 +852,7 @@ namespace NDMFMerge.Editor
                     }
 
                     if (!(item is UnityEngine.Object))
-                        changed |= ReflectionRemapObjectGraph(item, avatarRoot, visited, ref remappedCount, ref nulledCount);
+                        changed |= ReflectionRemapObjectGraph(item, avatarRoot, mergedBoneReferences, visited, ref remappedCount, ref nulledCount);
                 }
                 return changed;
             }
@@ -512,11 +875,8 @@ namespace NDMFMerge.Editor
                 if (typeof(UnityEngine.Object).IsAssignableFrom(fType))
                 {
                     var uoVal = value as UnityEngine.Object;
-                    if (uoVal != null && IsSceneObjectOutsideClone(uoVal, avatarRoot, out var refT))
+                    if (uoVal != null && TryRemapSceneObjectReference(uoVal, avatarRoot, mergedBoneReferences, out var newObj))
                     {
-                        var mappedT = TryResolveTransformInClone(avatarRoot, refT);
-                        var newObj = mappedT != null ? ConvertMappedObject(uoVal, mappedT) : null;
-
                         if (newObj != null && fType.IsAssignableFrom(newObj.GetType()))
                         {
                             field.SetValue(rootObj, newObj);
@@ -544,11 +904,8 @@ namespace NDMFMerge.Editor
                         var item = arr.GetValue(i);
                         if (item == null) continue;
 
-                        if (item is UnityEngine.Object arrObj && IsSceneObjectOutsideClone(arrObj, avatarRoot, out var refT))
+                        if (item is UnityEngine.Object arrObj && TryRemapSceneObjectReference(arrObj, avatarRoot, mergedBoneReferences, out var newObj))
                         {
-                            var mappedT = TryResolveTransformInClone(avatarRoot, refT);
-                            var newObj = mappedT != null ? ConvertMappedObject(arrObj, mappedT) : null;
-
                             if (newObj != null) { arr.SetValue(newObj, i); remappedCount++; }
                             else { arr.SetValue(null, i); nulledCount++; }
 
@@ -557,14 +914,14 @@ namespace NDMFMerge.Editor
                         }
 
                         if (!(item is UnityEngine.Object))
-                            changed |= ReflectionRemapObjectGraph(item, avatarRoot, visited, ref remappedCount, ref nulledCount);
+                            changed |= ReflectionRemapObjectGraph(item, avatarRoot, mergedBoneReferences, visited, ref remappedCount, ref nulledCount);
                     }
                     continue;
                 }
 
                 if (!fType.IsPrimitive && !fType.IsEnum && fType != typeof(string))
                 {
-                    changed |= ReflectionRemapObjectGraph(value, avatarRoot, visited, ref remappedCount, ref nulledCount);
+                    changed |= ReflectionRemapObjectGraph(value, avatarRoot, mergedBoneReferences, visited, ref remappedCount, ref nulledCount);
                 }
             }
 
@@ -605,7 +962,7 @@ namespace NDMFMerge.Editor
 #if CCK_ADDIN_MAGICACLOTHSUPPORT
             // SAFETY CHECK: avatarRoot should be the NDMF clone root, validated by caller
             var renderDeformers = avatarRoot.GetComponentsInChildren<MagicaRenderDeformer>(true).ToList();
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine($"Rebuilding MagicaRenderDeformer data: {renderDeformers.Count}");
             foreach (var rd in renderDeformers)
             {
@@ -615,7 +972,7 @@ namespace NDMFMerge.Editor
             }
 
             var virtualDeformers = avatarRoot.GetComponentsInChildren<MagicaVirtualDeformer>(true).ToList();
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine($"Rebuilding MagicaVirtualDeformer data: {virtualDeformers.Count}");
             foreach (var vd in virtualDeformers)
             {
@@ -625,7 +982,7 @@ namespace NDMFMerge.Editor
             }
 
             var boneCloths = avatarRoot.GetComponentsInChildren<MagicaBoneCloth>(true).ToList();
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine($"Rebuilding MagicaBoneCloth data: {boneCloths.Count}");
             foreach (var bc in boneCloths)
             {
@@ -635,7 +992,7 @@ namespace NDMFMerge.Editor
             }
 
             var meshCloths = avatarRoot.GetComponentsInChildren<MagicaMeshCloth>(true).ToList();
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine($"Rebuilding MagicaMeshCloth data: {meshCloths.Count}");
             foreach (var mc in meshCloths)
             {
@@ -652,11 +1009,18 @@ namespace NDMFMerge.Editor
         private void GenerateAASControllerAtEnd(Component targetCVRAvatar, Transform avatarRootClone, CVRMergeArmature merger)
         {
             if (targetCVRAvatar == null) return;
+
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine("  [AAS End-Gen] Starting post-merge AAS controller generation...");
             
             // SAFETY CHECK: Only modify if component is part of the NDMF clone hierarchy
             if (avatarRootClone != null && !targetCVRAvatar.transform.IsChildOf(avatarRootClone))
             {
-                if (merger.verboseLogging || merger.logLevel >= 2)
+                if (ShouldLogWarnings(merger))
+                    mergeLog.AppendLine("AAS end-gen: skipped - target CVRAvatar is not in clone hierarchy");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine("  [AAS End-Gen] Skipped: target CVRAvatar is not in clone hierarchy");
+                if (ShouldLogDetailed(merger))
                     mergeLog.AppendLine("AAS end-gen: Skipped - target CVRAvatar is not in clone hierarchy");
                 return;
             }
@@ -664,7 +1028,11 @@ namespace NDMFMerge.Editor
             var advSettings = GetAdvancedAvatarSettings(targetCVRAvatar);
             if (advSettings == null)
             {
-                if (merger.verboseLogging || merger.logLevel >= 2)
+                if (ShouldLogWarnings(merger))
+                    mergeLog.AppendLine("AAS end-gen: skipped - no avatarSettings found on target");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine("  [AAS End-Gen] Skipped: no avatarSettings found on target");
+                if (ShouldLogDetailed(merger))
                     mergeLog.AppendLine("AAS end-gen: No avatarSettings found on target.");
                 return;
             }
@@ -673,7 +1041,11 @@ namespace NDMFMerge.Editor
             var settingsList = GetSettingsList(advSettings);
             if (settingsList == null || settingsList.Count == 0)
             {
-                if (merger.verboseLogging || merger.logLevel >= 2)
+                if (ShouldLogWarnings(merger))
+                    mergeLog.AppendLine("AAS end-gen: skipped - settings list empty");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine("  [AAS End-Gen] Skipped: settings list empty");
+                if (ShouldLogDetailed(merger))
                     mergeLog.AppendLine("AAS end-gen: settings list empty.");
                 return;
             }
@@ -717,6 +1089,10 @@ namespace NDMFMerge.Editor
 
             if (baseController == null)
             {
+                if (ShouldLogWarnings(merger))
+                    mergeLog.AppendLine("AAS end-gen: skipped - avatarSettings.baseController missing or not AnimatorController");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine("  [AAS End-Gen] Skipped: base controller missing or not an AnimatorController");
                 mergeLog.AppendLine("AAS end-gen: ERROR - avatarSettings.baseController missing or not AnimatorController.");
                 return;
             }
@@ -787,7 +1163,9 @@ namespace NDMFMerge.Editor
 
             EditorUtility.SetDirty(targetCVRAvatar);
 
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine($"  [AAS End-Gen] Complete: added {createdEntries} AAS entries");
+            if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine($"AAS end-gen: added {createdEntries} AAS entries.");
         }
 
@@ -1010,7 +1388,7 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  Object mode merge complete: moved {childrenToMove.Count} object(s) to {targetParent.name}");
         }
 
@@ -1031,28 +1409,30 @@ namespace NDMFMerge.Editor
             }
         }
 
-        private void MergeOutfitWithoutDestroy(BuildContext ctx, CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform outfitRoot, Transform targetArmature, SkinnedMeshRenderer bodyReferenceMesh, Dictionary<OutfitToMerge, Transform> clonedOutfitByEntry)
+        private void MergeOutfitWithoutDestroy(BuildContext ctx, CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform outfitRoot, Transform targetArmature, SkinnedMeshRenderer bodyReferenceMesh, Dictionary<OutfitToMerge, Transform> clonedOutfitByEntry, Dictionary<int, Transform> mergedBoneReferences, Dictionary<AnimationClip, AnimationClip> clipReplacementMap)
         {
+            var armatureSettings = GetArmatureMergingSettings(merger);
+
             Transform outfitArmature = FindArmatureInOutfit(outfitRoot);
             if (outfitArmature == null)
             {
-                if (merger.logLevel >= 1)
+                if (ShouldLogWarnings(merger))
                     mergeLog.AppendLine($"  WARNING: Could not find armature in outfit, using root");
                 outfitArmature = outfitRoot;
             }
             else
             {
-                if (merger.verboseLogging || merger.logLevel >= 2)
+                if (ShouldLogInfo(merger))
                     mergeLog.AppendLine($"  Outfit armature: {outfitArmature.name}");
             }
 
             var usedBones = GetBonesUsedByMeshes(outfitRoot);
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  Used bones: {usedBones.Count}");
 
             if (usedBones.Count == 0)
             {
-                if (merger.verboseLogging || merger.logLevel >= 1)
+                if (ShouldLogWarnings(merger))
                     mergeLog.AppendLine($"  WARNING: No used bones found, skipping");
                 return;
             }
@@ -1073,15 +1453,18 @@ namespace NDMFMerge.Editor
             if (!string.IsNullOrEmpty(outfitEntry.meshPrefix))
                 ApplyMeshPrefix(outfitRoot, outfitEntry.meshPrefix);
 
-            var bonesToConstraint = new List<(Transform source, Transform target)>();
+            var bonesToReparent = new List<(Transform source, Transform target)>();
 
-            var boneMap = BuildBoneMappingWithConflicts(merger, outfitEntry, outfitArmature, targetArmature, usedBones, bonesToConstraint, outfitEntry.prefix, outfitEntry.suffix);
+            var bindposeCompensationBySourceBone = new Dictionary<Transform, Matrix4x4>();
+            var boneMap = BuildBoneMappingWithConflicts(merger, outfitEntry, outfitArmature, targetArmature, usedBones, bonesToReparent, bindposeCompensationBySourceBone, outfitEntry.prefix, outfitEntry.suffix);
             ApplySemanticBoneMatchingAdjustments(boneMap, merger.semanticBoneMatchingSettings, merger);
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  Bone map entries: {boneMap.Count}");
 
+            RegisterMergedBoneReferences(boneMap, mergedBoneReferences);
+
             var skinnedMeshes = outfitRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  SkinnedMeshRenderers: {skinnedMeshes.Length}");
 
             // Determine reference body mesh for this outfit when needed
@@ -1098,7 +1481,7 @@ namespace NDMFMerge.Editor
                 if (smr == null) continue;
                 if (!merger.IsExcluded(smr.transform))
                 {
-                    RemapSkinnedMeshRenderer(smr, boneMap, merger);
+                    RemapSkinnedMeshRenderer(smr, boneMap, bindposeCompensationBySourceBone, armatureSettings, merger);
 
                     // [NEW FEATURE] Bounds Fix Mode
                     ApplyBoundsFix(smr, outfitEntry.boundsFixMode, referenceForThisOutfit, merger);
@@ -1137,30 +1520,17 @@ namespace NDMFMerge.Editor
                 RemoveUnusedBones(targetArmature, usedBones, merger);
             }
 
-            foreach (var pair in bonesToConstraint)
+            foreach (var pair in bonesToReparent)
             {
                 var source = pair.source;
                 var target = pair.target;
 
                 if (source == null || target == null) continue;
 
-                source.SetParent(ctx.AvatarRootTransform, true);
+                source.SetParent(target, true);
 
-                var constraint = source.gameObject.AddComponent<ParentConstraint>();
-                var sourceParams = new ConstraintSource { sourceTransform = target, weight = 1f };
-                constraint.AddSource(sourceParams);
-
-                Matrix4x4 targetInverse = target.worldToLocalMatrix;
-                Vector3 localPos = targetInverse.MultiplyPoint(source.position);
-                Quaternion localRot = Quaternion.Inverse(target.rotation) * source.rotation;
-
-                constraint.constraintActive = true;
-                constraint.locked = true;
-                constraint.SetTranslationOffset(0, localPos);
-                constraint.SetRotationOffset(0, localRot.eulerAngles);
-
-                if (merger.verboseLogging || merger.logLevel >= 2)
-                    mergeLog.AppendLine($"  [Constraint] Constrained {source.name} to {target.name} (Offset preserved)");
+                if (ShouldLogDetailed(merger))
+                    mergeLog.AppendLine($"  [Reparent] Reparented {source.name} under {target.name} while preserving world pose");
             }
 
             foreach (var smr in skinnedMeshes)
@@ -1169,11 +1539,6 @@ namespace NDMFMerge.Editor
                 if (!merger.IsExcluded(smr.transform))
                     smr.transform.SetParent(ctx.AvatarRootTransform, true);
             }
-
-            var constraints = outfitRoot.GetComponentsInChildren<IConstraint>(true);
-            foreach (var constraint in constraints)
-                if (!merger.IsExcluded(((Component)constraint).transform))
-                    RemapConstraint(constraint, boneMap, merger);
 
             MergeDynamicComponents(outfitRoot, boneMap, merger);
 
@@ -1194,8 +1559,7 @@ namespace NDMFMerge.Editor
                 if (child != null && child.GetComponentInChildren<Component>(true) != null)
                     child.SetParent(ctx.AvatarRootTransform, true);
 
-            if (merger.verboseLogging || merger.logLevel >= 2)
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  Outfit merge complete");
 
             // Post-step: Blend shape task pipeline (task-scoped direction + options)
@@ -1211,7 +1575,7 @@ namespace NDMFMerge.Editor
                         TransferBlendShapes(ctx.AvatarRootTransform, outfitRoot, targetArmature, task, merger.blendShapeTransferSettings, merger);
 
                         if (task.enableGeneration)
-                            GenerateBlendShapesFromTask(ctx.AvatarRootTransform, targetArmature, task, clonedOutfitByEntry, merger.GetCVRAvatar(), merger, merger.blendShapeTransferSettings);
+                            GenerateBlendShapesFromTask(ctx.AvatarRootTransform, targetArmature, task, clonedOutfitByEntry, merger.GetCVRAvatar(), merger, merger.blendShapeTransferSettings, clipReplacementMap);
                     }
                 }
             }
@@ -1228,7 +1592,7 @@ namespace NDMFMerge.Editor
                     if (bodyReference != null)
                     {
                         smr.localBounds = bodyReference.localBounds;
-                        if (merger.verboseLogging || merger.logLevel >= 2)
+                        if (ShouldLogDetailed(merger))
                             mergeLog.AppendLine($"    Applied bounds copy from selected body mesh to {smr.name}");
                     }
                     break;
@@ -1236,7 +1600,7 @@ namespace NDMFMerge.Editor
                     if (smr.sharedMesh != null)
                     {
                         smr.localBounds = smr.sharedMesh.bounds;
-                        if (merger.verboseLogging || merger.logLevel >= 2)
+                        if (ShouldLogDetailed(merger))
                             mergeLog.AppendLine($"    Recalculated bounds for {smr.name}");
                     }
                     break;
@@ -1280,7 +1644,7 @@ namespace NDMFMerge.Editor
                 if (bone != null) UnityEngine.Object.DestroyImmediate(bone.gameObject);
 
             if (toRemove.Count > 0)
-                if (merger.verboseLogging || merger.logLevel >= 2)
+                if (ShouldLogDetailed(merger))
                     mergeLog.AppendLine($"  Removed {toRemove.Count} unused bones");
         }
 
@@ -1289,25 +1653,38 @@ namespace NDMFMerge.Editor
         // ----------------------------
         private void MergeAnimators(BuildContext ctx, CVRMergeArmature merger)
         {
+            var clipReplacementMap = new Dictionary<AnimationClip, AnimationClip>();
             var targetCVRAvatar = merger.GetCVRAvatar();
             if (targetCVRAvatar == null) return;
+
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine("  [Animator Merge] Starting animator merge...");
             
             // SAFETY CHECK: Only modify if target component is part of the NDMF clone hierarchy
             if (ctx.AvatarRootTransform != null && !targetCVRAvatar.transform.IsChildOf(ctx.AvatarRootTransform))
             {
-                if (merger.verboseLogging || merger.logLevel >= 2)
+                if (ShouldLogDetailed(merger))
                     mergeLog.AppendLine("  MergeAnimators: Skipped - target CVRAvatar is not in clone hierarchy");
                 return;
             }
 
             var targetAnimator = targetCVRAvatar.GetComponent<Animator>();
-            if (targetAnimator == null) return;
+            if (targetAnimator == null)
+            {
+                if (ShouldLogWarnings(merger))
+                    mergeLog.AppendLine("  WARNING: Animator merge skipped - target avatar has no Animator component");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine("  [Animator Merge] Skipped: no Animator component on target avatar");
+                return;
+            }
 
             var targetController = GetPreferredController(targetCVRAvatar);
             if (targetController == null)
             {
-                if (merger.verboseLogging || merger.logLevel >= 1)
+                if (ShouldLogWarnings(merger))
                     mergeLog.AppendLine("  WARNING: Target has no animator controller");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine("  [Animator Merge] Skipped: no animator controller available");
                 return;
             }
 
@@ -1320,6 +1697,10 @@ namespace NDMFMerge.Editor
 
             var newController = UnityEngine.Object.Instantiate(targetController);
             newController.name = $"{NDMF_PREFIX}{targetController.name}_Merged";
+
+            int parametersAdded = 0;
+            int layersAdded = 0;
+            int combinedLayerGroups = 0;
 
             // Pass 1: Collect and Add Parameters FIRST
             foreach (var outfitEntry in merger.outfitsToMerge)
@@ -1335,6 +1716,7 @@ namespace NDMFMerge.Editor
                     if (!newController.parameters.Any(p => p.name == param.name))
                     {
                         newController.AddParameter(param.name, param.type);
+                        parametersAdded++;
                     }
                 }
             }
@@ -1373,7 +1755,7 @@ namespace NDMFMerge.Editor
                     // [NEW FEATURE] Animator Path Rewriting
                     if (merger.animatorRewritePaths)
                     {
-                        RewriteAnimationPaths(clonedSM, outfitEntry.outfit.name, ctx.AvatarRootTransform);
+                        RewriteAnimationPaths(clonedSM, outfitEntry.outfit.name, ctx.AvatarRootTransform, clipReplacementMap, merger);
                     }
 
                     string layerName;
@@ -1425,11 +1807,13 @@ namespace NDMFMerge.Editor
                     if (layers.Count == 1)
                     {
                         newController.AddLayer(layers[0]);
+                        layersAdded++;
                     }
                     else
                     {
                         // Merge multiple layers with same name
                         var mergedLayer = layers[0];
+                        combinedLayerGroups++;
 
                         // [NEW FEATURE] Merge Avatar Masks
                         if (merger.animatorMergeAvatarMasks && layers.Any(l => l.avatarMask != null))
@@ -1438,49 +1822,72 @@ namespace NDMFMerge.Editor
                         }
 
                         newController.AddLayer(mergedLayer);
-                        if (merger.verboseLogging || merger.logLevel >= 2)
+                        layersAdded++;
+                        if (ShouldLogDetailed(merger))
                             mergeLog.AppendLine($"  Combined {layers.Count} layers with name '{kvp.Key}'");
                     }
                 }
             }
 
             TrySetActualControllerOnAvatar(targetCVRAvatar, newController, ctx.AvatarRootTransform);
+            ApplyAnimationClipReplacementsInClone(ctx.AvatarRootTransform, clipReplacementMap, merger);
+
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine($"  [Animator Merge] Complete: added {parametersAdded} parameter(s), added {layersAdded} layer(s), combined {combinedLayerGroups} layer group(s)");
         }
 
         // [NEW FEATURE] Rewrite Animation Paths
-        private void RewriteAnimationPaths(AnimatorStateMachine sm, string outfitName, Transform avatarRoot)
+        private void RewriteAnimationPaths(AnimatorStateMachine sm, string outfitName, Transform avatarRoot, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, CVRMergeArmature merger)
         {
+            if (sm == null || avatarRoot == null) return;
+
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine($"  [Animator Path Rewrite] Starting for outfit '{outfitName}'...");
+
+            int clipsVisited = 0;
+            int clipsRewritten = 0;
+
             foreach (var state in sm.states)
             {
-                if (state.state != null && state.state.motion is AnimationClip clip)
+                if (state.state != null)
                 {
-                    RewriteClipPaths(clip, outfitName, avatarRoot);
+                    if (RewriteMotionPaths(state.state, outfitName, avatarRoot, clipReplacementMap, ref clipsVisited, ref clipsRewritten, merger))
+                        EditorUtility.SetDirty(state.state);
                 }
             }
             foreach (var childSm in sm.stateMachines)
             {
                 if (childSm.stateMachine != null)
-                    RewriteAnimationPaths(childSm.stateMachine, outfitName, avatarRoot);
+                {
+                    RewriteAnimationPaths(childSm.stateMachine, outfitName, avatarRoot, clipReplacementMap, merger);
+                }
             }
+
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine($"  [Animator Path Rewrite] Complete: visited {clipsVisited} clip(s), rewritten {clipsRewritten} clip(s)");
         }
 
-        private void RewriteClipPaths(AnimationClip clip, string outfitName, Transform avatarRoot)
+        private bool RewriteClipPaths(AnimationClip clip, string outfitName, Transform avatarRoot, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, CVRMergeArmature merger, out AnimationClip rewrittenClip)
         {
-            // NDMF-safe: Modifies clip in place during build phase (Unity works on copies internally)
-            if (clip == null || avatarRoot == null) return;
+            rewrittenClip = clip;
+            if (clip == null || avatarRoot == null) return false;
+
+            if (clipReplacementMap != null && clipReplacementMap.TryGetValue(clip, out var existingCopy) && existingCopy != null)
+                rewrittenClip = existingCopy;
             
-            // Get all curve bindings from the original clip
-            var curveBindings = AnimationUtility.GetCurveBindings(clip);
-            var objectBindings = AnimationUtility.GetObjectReferenceCurveBindings(clip);
+            var curveBindings = AnimationUtility.GetCurveBindings(rewrittenClip);
+            var objectBindings = AnimationUtility.GetObjectReferenceCurveBindings(rewrittenClip);
             
-            if (curveBindings.Length == 0 && objectBindings.Length == 0) return;
+            if (curveBindings.Length == 0 && objectBindings.Length == 0) return false;
             
             bool anyPathsRewritten = false;
+            int rewrittenBindings = 0;
+            int skippedBindings = 0;
             
             // Process float curve bindings
             foreach (var binding in curveBindings)
             {
-                var curve = AnimationUtility.GetEditorCurve(clip, binding);
+                var curve = AnimationUtility.GetEditorCurve(rewrittenClip, binding);
                 if (curve == null) continue;
                 
                 // Check if path needs rewriting (starts with outfit name)
@@ -1494,15 +1901,27 @@ namespace NDMFMerge.Editor
                     
                     if (target != null)
                     {
+                        rewrittenClip = GetOrCreateModifiedClipCopy(clip, clipReplacementMap);
+                        if (rewrittenClip != clip)
+                        {
+                            curveBindings = AnimationUtility.GetCurveBindings(rewrittenClip);
+                            objectBindings = AnimationUtility.GetObjectReferenceCurveBindings(rewrittenClip);
+                        }
+
                         // Remove old binding
-                        AnimationUtility.SetEditorCurve(clip, binding, null);
+                        AnimationUtility.SetEditorCurve(rewrittenClip, binding, null);
                         
                         // Create new binding with rewritten path
                         var newBinding = binding;
                         newBinding.path = newPath;
-                        AnimationUtility.SetEditorCurve(clip, newBinding, curve);
+                        AnimationUtility.SetEditorCurve(rewrittenClip, newBinding, curve);
                         
                         anyPathsRewritten = true;
+                        rewrittenBindings++;
+                    }
+                    else
+                    {
+                        skippedBindings++;
                     }
                 }
             }
@@ -1510,7 +1929,7 @@ namespace NDMFMerge.Editor
             // Process object reference bindings
             foreach (var binding in objectBindings)
             {
-                var keyframes = AnimationUtility.GetObjectReferenceCurve(clip, binding);
+                var keyframes = AnimationUtility.GetObjectReferenceCurve(rewrittenClip, binding);
                 if (keyframes == null || keyframes.Length == 0) continue;
                 
                 // Check if path needs rewriting (starts with outfit name)
@@ -1524,23 +1943,115 @@ namespace NDMFMerge.Editor
                     
                     if (target != null)
                     {
+                        rewrittenClip = GetOrCreateModifiedClipCopy(clip, clipReplacementMap);
+                        if (rewrittenClip != clip)
+                        {
+                            curveBindings = AnimationUtility.GetCurveBindings(rewrittenClip);
+                            objectBindings = AnimationUtility.GetObjectReferenceCurveBindings(rewrittenClip);
+                        }
+
                         // Remove old binding
-                        AnimationUtility.SetObjectReferenceCurve(clip, binding, null);
+                        AnimationUtility.SetObjectReferenceCurve(rewrittenClip, binding, null);
                         
                         // Create new binding with rewritten path
                         var newBinding = binding;
                         newBinding.path = newPath;
-                        AnimationUtility.SetObjectReferenceCurve(clip, newBinding, keyframes);
+                        AnimationUtility.SetObjectReferenceCurve(rewrittenClip, newBinding, keyframes);
                         
                         anyPathsRewritten = true;
+                        rewrittenBindings++;
+                    }
+                    else
+                    {
+                        skippedBindings++;
                     }
                 }
             }
             
             if (anyPathsRewritten)
             {
-                EditorUtility.SetDirty(clip);
+                EditorUtility.SetDirty(rewrittenClip);
             }
+
+            if (ShouldLogDetailed(merger) || (ShouldLogInfo(merger) && anyPathsRewritten))
+                mergeLog.AppendLine($"    [Animator Path Rewrite] {rewrittenClip.name}: rewritten {rewrittenBindings} binding(s), skipped {skippedBindings}");
+
+            return anyPathsRewritten;
+        }
+
+        private bool RewriteMotionPaths(AnimatorState animatorState, string outfitName, Transform avatarRoot, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, ref int clipsVisited, ref int clipsRewritten, CVRMergeArmature merger)
+        {
+            if (animatorState == null || animatorState.motion == null) return false;
+
+            if (!RewriteMotionReference(animatorState.motion, outfitName, avatarRoot, clipReplacementMap, ref clipsVisited, ref clipsRewritten, merger, out var rewrittenMotion))
+                return false;
+
+            animatorState.motion = rewrittenMotion;
+            return true;
+        }
+
+        private bool RewriteMotionReference(Motion motion, string outfitName, Transform avatarRoot, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, ref int clipsVisited, ref int clipsRewritten, CVRMergeArmature merger, out Motion rewrittenMotion)
+        {
+            rewrittenMotion = motion;
+            if (motion == null) return false;
+
+            if (motion is AnimationClip clip)
+            {
+                clipsVisited++;
+                bool clipChanged = RewriteClipPaths(clip, outfitName, avatarRoot, clipReplacementMap, merger, out var rewrittenClip);
+                rewrittenMotion = rewrittenClip;
+                if (clipChanged)
+                    clipsRewritten++;
+                return clipChanged || rewrittenClip != clip;
+            }
+
+            if (motion is BlendTree blendTree)
+            {
+                var children = blendTree.children;
+                var rewrittenChildren = new Motion[children.Length];
+                bool anyChildChanged = false;
+
+                for (int i = 0; i < children.Length; i++)
+                {
+                    rewrittenChildren[i] = children[i].motion;
+                    if (RewriteMotionReference(children[i].motion, outfitName, avatarRoot, clipReplacementMap, ref clipsVisited, ref clipsRewritten, merger, out var childMotion))
+                    {
+                        rewrittenChildren[i] = childMotion;
+                        anyChildChanged = true;
+                    }
+                }
+
+                if (!anyChildChanged) return false;
+
+                var clonedTree = UnityEngine.Object.Instantiate(blendTree);
+                clonedTree.name = blendTree.name + " (NDMF Modified)";
+                var clonedChildren = clonedTree.children;
+                for (int i = 0; i < clonedChildren.Length; i++)
+                {
+                    var child = clonedChildren[i];
+                    child.motion = rewrittenChildren[i];
+                    clonedChildren[i] = child;
+                }
+                clonedTree.children = clonedChildren;
+                rewrittenMotion = clonedTree;
+                return true;
+            }
+
+            return false;
+        }
+
+        private AnimationClip GetOrCreateModifiedClipCopy(AnimationClip clip, Dictionary<AnimationClip, AnimationClip> clipReplacementMap)
+        {
+            if (clip == null) return null;
+
+            if (clipReplacementMap != null && clipReplacementMap.TryGetValue(clip, out var existingCopy) && existingCopy != null)
+                return existingCopy;
+
+            var cloned = UnityEngine.Object.Instantiate(clip);
+            cloned.name = clip.name + " (NDMF Modified)";
+            if (clipReplacementMap != null)
+                clipReplacementMap[clip] = cloned;
+            return cloned;
         }
 
         // [NEW FEATURE] Merge Avatar Masks
@@ -1652,7 +2163,7 @@ namespace NDMFMerge.Editor
             var sourceStreams = sourceTransform.GetComponentsInChildren(paramStreamType, true);
             if (sourceStreams.Length == 0) return;
 
-            if (merger.verboseLogging && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Parameter Stream] Merging {sourceStreams.Length} parameter stream(s)...");
 
             var targetStream = targetCVRAvatar.GetComponent(paramStreamType);
@@ -1679,7 +2190,7 @@ namespace NDMFMerge.Editor
                 }
             }
             
-            if (merger.verboseLogging && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Parameter Stream] Complete: added {entriesAdded} entries to target stream");
         }
 
@@ -1702,7 +2213,7 @@ namespace NDMFMerge.Editor
             var allDrivers = avatarRoot.GetComponentsInChildren(driverType, true).Cast<Component>().ToList();
             if (allDrivers.Count == 0) return;
             
-            if (merger.verboseLogging && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Animator Driver Split] Processing {allDrivers.Count} animator driver(s)...");
 
             var entries = new List<DriverEntry>();
@@ -1776,10 +2287,9 @@ namespace NDMFMerge.Editor
                 idx += chunk.Count;
             }
             
-            if (merger.verboseLogging && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Animator Driver Split] Complete: created {driverIndex} merged driver component(s) from {entries.Count} entries");
         }
-
         private float GetDriverValue(Component driver, int slot1to16)
         {
             var f = driver.GetType().GetField($"animatorParameter{slot1to16:00}");
@@ -1810,7 +2320,7 @@ namespace NDMFMerge.Editor
             var sourceDrivers = sourceTransform.GetComponentsInChildren(animatorDriverType, true);
             if (sourceDrivers.Length == 0) return;
 
-            if (merger.verboseLogging && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Animator Driver] Merging {sourceDrivers.Length} animator driver(s)...");
 
             var targetDriver = targetCVRAvatar.GetComponent(animatorDriverType);
@@ -1847,10 +2357,9 @@ namespace NDMFMerge.Editor
 
             EditorUtility.SetDirty(targetDriver);
             
-            if (merger.verboseLogging && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Animator Driver] Complete: added {entriesAdded} parameters to target driver");
         }
-
         // ----------------------------
         // Advanced Avatar Settings merge
         // ----------------------------
@@ -1859,12 +2368,12 @@ namespace NDMFMerge.Editor
             try
             {
                 if (sourceCVRAvatar == null) return;
-                
+
                 // SAFETY CHECK: Only modify if target component is part of the NDMF clone hierarchy
                 if (avatarRootClone != null && !targetCVRAvatar.transform.IsChildOf(avatarRootClone))
                 {
-                    if (merger.verboseLogging || merger.logLevel >= 2)
-                        mergeLog.AppendLine($"  Skipped merging Advanced Avatar Settings - target is not in clone hierarchy");
+                    if (ShouldLogDetailed(merger))
+                        mergeLog.AppendLine("  Skipped merging Advanced Avatar Settings - target is not in clone hierarchy");
                     return;
                 }
 
@@ -1888,7 +2397,8 @@ namespace NDMFMerge.Editor
                 var outfitRoot = sourceCVRAvatar.transform;
                 var outfitName = outfitRoot.name;
 
-                mergeLog.AppendLine($"  Processing settings from {outfitName} (count: {sourceList.Count})");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine($"  [Advanced Avatar Settings] Merging {sourceList.Count} setting(s) from {outfitName}...");
 
                 foreach (var sourceEntry in sourceList)
                 {
@@ -1911,61 +2421,59 @@ namespace NDMFMerge.Editor
                         }
                     }
 
-                    if (!hasConflict)
+                    if (hasConflict)
                     {
-                        try
+                        skippedCount++;
+                        continue;
+                    }
+
+                    try
+                    {
+                        var entryType = sourceEntry.GetType();
+                        var newEntry = Activator.CreateInstance(entryType);
+
+                        CopyBasicFields(sourceEntry, newEntry);
+
+                        if (!string.IsNullOrEmpty(merger.advancedSettingsPrefix))
                         {
-                            var entryType = sourceEntry.GetType();
-                            var newEntry = Activator.CreateInstance(entryType);
+                            SetEntryMachineName(newEntry, finalMachineName);
+                            var entryName = GetEntryName(sourceEntry);
+                            if (!string.IsNullOrEmpty(entryName))
+                                SetEntryName(newEntry, merger.advancedSettingsPrefix + entryName);
+                        }
 
-                            CopyBasicFields(sourceEntry, newEntry);
-
-                            if (!string.IsNullOrEmpty(merger.advancedSettingsPrefix))
+                        var settingProperty = entryType.GetProperty("setting");
+                        if (settingProperty != null)
+                        {
+                            var sourceSetting = settingProperty.GetValue(sourceEntry);
+                            if (sourceSetting != null)
                             {
-                                SetEntryMachineName(newEntry, finalMachineName);
-                                var entryName = GetEntryName(sourceEntry);
-                                if (!string.IsNullOrEmpty(entryName))
-                                    SetEntryName(newEntry, merger.advancedSettingsPrefix + entryName);
-                            }
-
-                            var settingProperty = entryType.GetProperty("setting");
-                            if (settingProperty != null)
-                            {
-                                var sourceSetting = settingProperty.GetValue(sourceEntry);
-                                if (sourceSetting != null)
+                                var settingCopy = CopySettingObject(sourceSetting, outfitName, avatarRoot, merger);
+                                if (settingCopy != null)
                                 {
-                                    var settingCopy = CopySettingObject(sourceSetting, outfitName, avatarRoot, merger);
-                                    if (settingCopy != null)
-                                    {
-                                        settingProperty.SetValue(newEntry, settingCopy);
-                                        targetList.Add(newEntry);
-                                        mergedCount++;
-                                    }
-                                    else
-                                    {
-                                        skippedCount++;
-                                        if (merger.verboseLogging || merger.logLevel >= 2)
-                                            mergeLog.AppendLine($"    Skipped '{machineName}' - failed to copy setting object");
-                                    }
+                                    settingProperty.SetValue(newEntry, settingCopy);
+                                    targetList.Add(newEntry);
+                                    mergedCount++;
+                                }
+                                else
+                                {
+                                    skippedCount++;
+                                    if (ShouldLogDetailed(merger))
+                                        mergeLog.AppendLine($"    Skipped '{machineName}' - failed to copy setting object");
                                 }
                             }
                         }
-                        catch (Exception ex)
-                        {
-                            skippedCount++;
-                            if (merger.verboseLogging || merger.logLevel >= 2)
-                                mergeLog.AppendLine($"    Failed to merge '{machineName}': {ex.Message}");
-                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
                         skippedCount++;
+                        if (ShouldLogDetailed(merger))
+                            mergeLog.AppendLine($"    Failed to merge '{machineName}': {ex.Message}");
                     }
                 }
 
-                if (mergedCount > 0 || skippedCount > 0)
-                    if (merger.verboseLogging || merger.logLevel >= 2)
-                        mergeLog.AppendLine($"  Merged {mergedCount} settings from {outfitName} (skipped {skippedCount})");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine($"  [Advanced Avatar Settings] Complete: merged {mergedCount} setting(s) from {outfitName} (skipped {skippedCount})");
 
                 if (mergedCount > 0)
                 {
@@ -2127,7 +2635,7 @@ namespace NDMFMerge.Editor
             {
                 resolvedGO = FindGameObjectByPath(avatarRoot, normalizedPath);
                 if (resolvedGO == null)
-                    if (merger.verboseLogging || merger.logLevel >= 1)
+                    if (ShouldLogWarnings(merger))
                         mergeLog.AppendLine($"    WARNING: Could not resolve AAS target path: {normalizedPath}");
             }
 
@@ -2299,7 +2807,7 @@ namespace NDMFMerge.Editor
 
         private void MergeHierarchy(Transform source, Transform target, Dictionary<Transform, Transform> boneMap, CVRMergeArmature merger, HashSet<Transform> usedBones)
         {
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine($"  MergeHierarchy: source={source.name}, target={target.name}");
 
             int mergedCount = 0;
@@ -2376,7 +2884,7 @@ namespace NDMFMerge.Editor
             foreach (var obj in toDestroy)
                 if (obj != null) UnityEngine.Object.DestroyImmediate(obj);
 
-            if (merger.verboseLogging || merger.logLevel >= 2)
+            if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine($"    Merged: {mergedCount}, Moved: {movedCount}, Skipped: {skippedCount}, Destroyed: {toDestroy.Count}");
         }
 
@@ -2408,7 +2916,7 @@ namespace NDMFMerge.Editor
                 bone.name = outfitEntry.uniqueBonePrefix + bone.name;
 
             if (bonesToRename.Count > 0)
-                if (merger.verboseLogging || merger.logLevel >= 2)
+                if (ShouldLogDetailed(merger))
                     mergeLog.AppendLine($"  Prefixed {bonesToRename.Count} unique bones with '{outfitEntry.uniqueBonePrefix}'");
         }
 
@@ -2445,7 +2953,8 @@ namespace NDMFMerge.Editor
             Transform sourceRoot,
             Transform target,
             HashSet<Transform> usedBones,
-            List<(Transform, Transform)> bonesToConstraint,
+            List<(Transform, Transform)> bonesToReparent,
+            Dictionary<Transform, Matrix4x4> bindposeCompensationBySourceBone,
             string prefix,
             string suffix)
         {
@@ -2511,6 +3020,7 @@ namespace NDMFMerge.Editor
                             if (conflict.targetBone != null)
                             {
                                 mapping[sourceBone] = conflict.targetBone;
+                                bindposeCompensationBySourceBone[sourceBone] = ComputeBindposeCompensationDelta(sourceBone, conflict.targetBone);
                                 mapped = true;
                             }
                             break;
@@ -2519,6 +3029,7 @@ namespace NDMFMerge.Editor
                             if (conflict.customTargetBone != null)
                             {
                                 mapping[sourceBone] = conflict.customTargetBone;
+                                bindposeCompensationBySourceBone[sourceBone] = ComputeBindposeCompensationDelta(sourceBone, conflict.customTargetBone);
                                 mapped = true;
                             }
                             break;
@@ -2526,7 +3037,7 @@ namespace NDMFMerge.Editor
                         case BoneConflictResolution.ConstraintToTarget:
                             if (conflict.targetBone != null)
                             {
-                                bonesToConstraint.Add((sourceBone, conflict.targetBone));
+                                bonesToReparent.Add((sourceBone, conflict.targetBone));
                                 mapped = true;
                             }
                             break;
@@ -2563,7 +3074,7 @@ namespace NDMFMerge.Editor
                     if (boneNameMappings.ContainsKey(boneName))
                     {
                         boneName = boneNameMappings[boneName];
-                        if (merger.verboseLogging || merger.logLevel >= 2)
+                        if (ShouldLogDetailed(merger))
                             mergeLog.AppendLine($"    Applied bone name mapping: {sourceBone.name} -> {boneName}");
                     }
 
@@ -2576,7 +3087,7 @@ namespace NDMFMerge.Editor
                         targetBone = FindBoneByLevenshtein(target, boneName, merger.maxLevenshteinDistance);
                         if (targetBone != null)
                         {
-                            if (merger.verboseLogging || merger.logLevel >= 2)
+                            if (ShouldLogDetailed(merger))
                                 mergeLog.AppendLine($"    Fuzzy match: {sourceBone.name} -> {targetBone.name}");
                         }
                     }
@@ -2590,7 +3101,7 @@ namespace NDMFMerge.Editor
                         {
                             targetBone = FindBoneByPatterns(target, sem.patterns, sem.caseInsensitive);
                             if (targetBone != null)
-                                if (merger.verboseLogging || merger.logLevel >= 2)
+                                if (ShouldLogDetailed(merger))
                                     mergeLog.AppendLine($"    Pattern match: {sourceBone.name} -> {targetBone.name}");
                         }
 
@@ -2625,6 +3136,13 @@ namespace NDMFMerge.Editor
             return mapping;
         }
 
+        // Converts source-bone weights to target-bone space by baking the source->target delta into bindposes.
+        private static Matrix4x4 ComputeBindposeCompensationDelta(Transform sourceBone, Transform targetBone)
+        {
+            if (sourceBone == null || targetBone == null) return Matrix4x4.identity;
+            return targetBone.worldToLocalMatrix * sourceBone.localToWorldMatrix;
+        }
+
         // Simple wildcard matcher (* and ?) with optional case-insensitive
         private bool MatchesPatternName(string name, string pattern, bool caseInsensitive)
         {
@@ -2655,16 +3173,22 @@ namespace NDMFMerge.Editor
 
         private Transform FindBoneByPatterns(Transform root, List<string> patterns, bool caseInsensitive)
         {
+            if (root == null) return null;
+
             Transform found = null;
             void Search(Transform t)
             {
                 if (found != null) return;
                 if (MatchesAnyPattern(t.name, patterns, caseInsensitive))
                 {
-                    found = t; return;
+                    found = t;
+                    return;
                 }
-                foreach (Transform child in t) Search(child);
+
+                foreach (Transform child in t)
+                    Search(child);
             }
+
             Search(root);
             return found;
         }
@@ -2760,51 +3284,102 @@ namespace NDMFMerge.Editor
             return cvrAvatarType != null ? root.GetComponent(cvrAvatarType) : null;
         }
 
-        private void RemapSkinnedMeshRenderer(SkinnedMeshRenderer smr, Dictionary<Transform, Transform> boneMap, CVRMergeArmature merger = null)
+        private void RemapSkinnedMeshRenderer(
+            SkinnedMeshRenderer smr,
+            Dictionary<Transform, Transform> boneMap,
+            Dictionary<Transform, Matrix4x4> bindposeCompensationBySourceBone = null,
+            ArmatureMergingSettings settings = null,
+            CVRMergeArmature merger = null)
         {
             var bones = smr.bones;
             var newBones = new Transform[bones.Length];
             int remappedCount = 0;
+            int compensatedBindposeCount = 0;
+            int autoCompensatedBindposeCount = 0;
             bool changed = false;
+
+            bool compensateBindposes = settings == null || settings.compensateBindposesOnBoneRemap;
+            bool compensateAutoMappedBones = settings == null || settings.compensateAutoMappedBones;
+
+            Mesh mesh = null;
+            Matrix4x4[] bindposes = null;
+            bool canAdjustBindposes = false;
+            bool bindposesChanged = false;
+
+            if (compensateBindposes && smr.sharedMesh != null)
+            {
+                if (smr.sharedMesh.bindposes != null && smr.sharedMesh.bindposes.Length == bones.Length)
+                {
+                    mesh = EnsureSceneMeshInstance(smr, "NDMF Bone Remap");
+                    if (mesh != null)
+                    {
+                        bindposes = mesh.bindposes;
+                        if (bindposes != null && bindposes.Length == bones.Length)
+                            canAdjustBindposes = true;
+                    }
+                }
+                else if (merger != null && ShouldLogDetailed(merger))
+                {
+                    mergeLog.AppendLine($"    [Bone Remap] Skipping bindpose compensation on mesh '{smr.name}' due to bindpose/bone count mismatch.");
+                }
+            }
 
             for (int i = 0; i < bones.Length; i++)
             {
-                if (bones[i] != null && boneMap.TryGetValue(bones[i], out var mappedBone))
+                var sourceBone = bones[i];
+                if (sourceBone != null && boneMap.TryGetValue(sourceBone, out var mappedBone))
                 {
                     newBones[i] = mappedBone;
                     changed = true;
                     remappedCount++;
+
+                    if (canAdjustBindposes)
+                    {
+                        Matrix4x4 delta = Matrix4x4.identity;
+                        bool hasStoredDelta = bindposeCompensationBySourceBone != null && bindposeCompensationBySourceBone.TryGetValue(sourceBone, out delta);
+                        if (!hasStoredDelta)
+                        {
+                            if (compensateAutoMappedBones)
+                            {
+                                // Fallback for name/fuzzy mappings that are not represented in explicit conflict entries.
+                                delta = ComputeBindposeCompensationDelta(sourceBone, mappedBone);
+                                autoCompensatedBindposeCount++;
+                            }
+                            else
+                            {
+                                continue;
+                            }
+                        }
+
+                        // New skinning uses targetBone * bindposeNew. Bake source->target delta so vertices stay in place.
+                        bindposes[i] = delta * bindposes[i];
+                        bindposesChanged = true;
+                        compensatedBindposeCount++;
+                    }
                 }
-                else newBones[i] = bones[i];
+                else newBones[i] = sourceBone;
             }
 
             if (changed) smr.bones = newBones;
-            if (merger != null && merger.verboseLogging && merger.logLevel >= 2 && remappedCount > 0)
+            if (bindposesChanged && mesh != null)
+                mesh.bindposes = bindposes;
+
+            if (merger != null && ShouldLogDetailed(merger) && remappedCount > 0)
                 mergeLog.AppendLine($"    [Bone Remap] Remapped {remappedCount} bone(s) on mesh '{smr.name}'");
+            if (merger != null && ShouldLogDetailed(merger) && compensatedBindposeCount > 0)
+                mergeLog.AppendLine($"    [Bone Remap] Applied bindpose compensation on {compensatedBindposeCount} bone slot(s) for mesh '{smr.name}'");
+            if (merger != null && ShouldLogDetailed(merger) && autoCompensatedBindposeCount > 0)
+                mergeLog.AppendLine($"    [Bone Remap] {autoCompensatedBindposeCount} slot(s) used automatic source->target compensation (non-conflict mapping).");
                 
             if (smr.rootBone != null && boneMap.TryGetValue(smr.rootBone, out var newRootBone))
                 smr.rootBone = newRootBone;
         }
 
-        private void RemapConstraint(IConstraint constraint, Dictionary<Transform, Transform> boneMap, CVRMergeArmature merger)
-        {
-            int remappedCount = 0;
-            for (int i = 0; i < constraint.sourceCount; i++)
-            {
-                var source = constraint.GetSource(i);
-                if (source.sourceTransform != null && boneMap.TryGetValue(source.sourceTransform, out var mapped))
-                {
-                    source.sourceTransform = mapped;
-                    constraint.SetSource(i, source);
-                    remappedCount++;
-                }
-            }
-            if ((merger.verboseLogging) && merger.logLevel >= 2 && remappedCount > 0)
-                mergeLog.AppendLine($"      Remapped {remappedCount} constraint source(s)");
-        }
-
         private void MergeDynamicComponents(Transform sourceTransform, Dictionary<Transform, Transform> boneMap, CVRMergeArmature merger)
         {
+            int dynamicBonesFound = 0;
+            int magicaClothsFound = 0;
+
             // [FIX] Respect flags
             if (merger.mergeDynamicBones)
             {
@@ -2812,8 +3387,11 @@ namespace NDMFMerge.Editor
                 if (dynamicBoneType != null)
                 {
                     var dynamicBones = sourceTransform.GetComponentsInChildren(dynamicBoneType, true);
-                    if ((merger.verboseLogging) && merger.logLevel >= 2 && dynamicBones.Length > 0)
+                    dynamicBonesFound = dynamicBones.Length;
+                    if (ShouldLogInfo(merger) && dynamicBones.Length > 0)
                         mergeLog.AppendLine($"    [Dynamic Bones] Remapping {dynamicBones.Length} Dynamic Bone component(s)...");
+                    else if (ShouldLogInfo(merger) && dynamicBones.Length == 0)
+                        mergeLog.AppendLine("    [Dynamic Bones] None found");
                     foreach (var db in dynamicBones)
                     {
                         RemapComponentTransformField(db, "m_Root", boneMap, merger);
@@ -2829,12 +3407,18 @@ namespace NDMFMerge.Editor
                 if (magicaClothType != null)
                 {
                     var magicaCloths = sourceTransform.GetComponentsInChildren(magicaClothType, true);
-                    if ((merger.verboseLogging) && merger.logLevel >= 2 && magicaCloths.Length > 0)
+                    magicaClothsFound = magicaCloths.Length;
+                    if (ShouldLogInfo(merger) && magicaCloths.Length > 0)
                         mergeLog.AppendLine($"    [MagicaCloth] Remapping {magicaCloths.Length} MagicaCloth component(s)...");
+                    else if (ShouldLogInfo(merger) && magicaCloths.Length == 0)
+                        mergeLog.AppendLine("    [MagicaCloth] None found");
                     foreach (var mc in magicaCloths)
                         RemapComponentTransformList(mc, "clothTarget", boneMap, merger);
                 }
             }
+
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine($"  [Dynamic Component Remap] Complete: DynamicBone={dynamicBonesFound}, MagicaCloth={magicaClothsFound}");
         }
 
         private void RemapComponentTransformField(Component component, string fieldName, Dictionary<Transform, Transform> boneMap, CVRMergeArmature merger)
@@ -2851,8 +3435,8 @@ namespace NDMFMerge.Editor
                 if (currentTransform != null && boneMap.TryGetValue(currentTransform, out var mapped))
                 {
                     field.SetValue(component, mapped);
-                    if ((merger.verboseLogging) && merger.logLevel >= 2)
-                        mergeLog.AppendLine($"      Remapped {component.GetType().Name}.{fieldName}: {currentTransform.name} → {mapped.name}");
+                    if (ShouldLogDetailed(merger))
+                        mergeLog.AppendLine($"      Remapped {component.GetType().Name}.{fieldName}: {currentTransform.name} -> {mapped.name}");
                 }
             }
         }
@@ -2880,14 +3464,15 @@ namespace NDMFMerge.Editor
                         }
                     }
                 }
-                if ((merger.verboseLogging) && merger.logLevel >= 2 && remappedCount > 0)
+                if (ShouldLogDetailed(merger) && remappedCount > 0)
                     mergeLog.AppendLine($"      Remapped {remappedCount} transform(s) in {component.GetType().Name}.{fieldName}");
             }
         }
 
         private void MergeAdvancedPointerTrigger(Transform sourceTransform)
         {
-            // Placeholder for future implementation
+            if (sourceTransform == null) return;
+            mergeLog.AppendLine("  [Advanced Pointer Trigger] Skipped: merge not implemented yet");
         }
 
         private Type FindTypeInLoadedAssemblies(string typeName)
@@ -2903,9 +3488,9 @@ namespace NDMFMerge.Editor
             if (!settings.fillMissingUVs && !settings.autoFixOverlapping && !settings.autoFixInverted)
                 return;
             
-            bool verbose = merger.verboseLogging || settings.verboseLogging;
+            bool verbose = ShouldLogDetailed(merger);
             
-            if (verbose && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine("  [UV Validation] Starting UV validation and fixing...");
             var skinnedMeshes = outfitRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             int meshesProcessed = 0, uvsGenerated = 0, overlapsFixed = 0, invertsFixed = 0;
@@ -2924,7 +3509,7 @@ namespace NDMFMerge.Editor
                     
                     if (uv0.Count == 0 || uv0.Count != mesh.vertexCount)
                     {
-                        if (verbose && merger.logLevel >= 2)
+                        if (verbose)
                             mergeLog.AppendLine($"    Generating missing UVs for {smr.name}");
                         mesh.SetUVs(0, Enumerable.Repeat(Vector2.zero, mesh.vertexCount).ToArray());
                         uvsGenerated++;
@@ -2940,7 +3525,7 @@ namespace NDMFMerge.Editor
                     
                     if (HasOverlappingUVs(uv0, mesh.triangles))
                     {
-                        if (verbose && merger.logLevel >= 2)
+                        if (verbose)
                             mergeLog.AppendLine($"    Fixing overlapping UVs for {smr.name}");
                         Unwrapping.GenerateSecondaryUVSet(mesh);
                         overlapsFixed++;
@@ -2957,7 +3542,7 @@ namespace NDMFMerge.Editor
                     
                     if (HasInvertedUVs(uv0, triangles))
                     {
-                        if (verbose && merger.logLevel >= 2)
+                        if (verbose)
                             mergeLog.AppendLine($"    Flipping inverted UVs for {smr.name}");
                         for (int i = 0; i < uv0.Count; i++)
                             uv0[i] = new Vector2(uv0[i].x, 1f - uv0[i].y);
@@ -2974,7 +3559,7 @@ namespace NDMFMerge.Editor
                 }
             }
             
-            if (verbose && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [UV Validation] Complete: {meshesProcessed} meshes processed, {uvsGenerated} UVs generated, {overlapsFixed} overlaps fixed, {invertsFixed} inverts fixed");
         }
 
@@ -3016,15 +3601,16 @@ namespace NDMFMerge.Editor
             if (!settings.consolidateMaterials && !settings.mergeDuplicateMaterials)
                 return;
             
-            bool verbose = merger.verboseLogging || settings.verboseLogging;
+            bool verbose = ShouldLogDetailed(merger);
             
-            if (verbose && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine("  [Material Consolidation] Starting material optimization...");
             var skinnedMeshes = outfitRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             
             // Build material database
             var materialMap = new Dictionary<Material, Material>();
             var materialsByShader = new Dictionary<Shader, List<Material>>();
+            int meshesUpdated = 0;
             
             foreach (var smr in skinnedMeshes)
             {
@@ -3057,7 +3643,7 @@ namespace NDMFMerge.Editor
                             {
                                 materialMap[matB] = matA;
                                 consolidatedCount++;
-                                if (verbose && merger.logLevel >= 2)
+                                if (verbose)
                                     mergeLog.AppendLine($"    Consolidating '{matB.name}' -> '{matA.name}'");
                             }
                         }
@@ -3086,15 +3672,14 @@ namespace NDMFMerge.Editor
                 {
                     smr.sharedMaterials = mats;
                     EditorUtility.SetDirty(smr);
-                    if (verbose && merger.logLevel >= 2)
+                    meshesUpdated++;
+                    if (verbose)
                         mergeLog.AppendLine($"    Applied material remapping to mesh: {smr.name}");
                 }
             }
             
-            if (verbose && merger.logLevel >= 2)
-                mergeLog.AppendLine($"  [Material Consolidation] Complete: {consolidatedCount} materials consolidated");
-            else if (consolidatedCount > 0)
-                mergeLog.AppendLine($"  [Material Consolidation] Complete: {consolidatedCount} materials consolidated");
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine($"  [Material Consolidation] Complete: {consolidatedCount} materials consolidated across {meshesUpdated} mesh(es)");
         }
 
         private bool AreMaterialsSimilar(Material a, Material b, MaterialConsolidationSettings settings)
@@ -3142,8 +3727,8 @@ namespace NDMFMerge.Editor
             // Weight Transfer (Copy current blend shape values)
             if (!task.enableWeightTransfer) return;
 
-            bool verbose = merger.verboseLogging || settings.verboseLogging;
-            if (verbose && merger.logLevel >= 2)
+            bool verbose = ShouldLogDetailed(merger);
+            if (verbose)
                 mergeLog.AppendLine("  [Blend Shape Transfer] Starting blend shape weight transfer...");
 
             int appliedWeights = 0;
@@ -3155,7 +3740,7 @@ namespace NDMFMerge.Editor
 
                     if (srcSMR == null || dstSMR == null)
                     {
-                        if (verbose && merger.logLevel >= 1)
+                        if (ShouldLogWarnings(merger))
                             mergeLog.AppendLine("  [Blend Shape Transfer] Mesh -> Mesh skipped: source or target mesh was not resolved in clone hierarchy.");
                         return;
                     }
@@ -3166,7 +3751,7 @@ namespace NDMFMerge.Editor
 
                     appliedWeights += TransferBlendShapeWeightsBetweenMeshes(srcSMR, srcMesh, dstSMR, dstMesh, task);
 
-                    if (verbose && merger.logLevel >= 2)
+                    if (verbose)
                         mergeLog.AppendLine($"  [Blend Shape Transfer] Mesh -> Mesh complete: applied {appliedWeights} weight(s)");
                     else if (appliedWeights > 0)
                         mergeLog.AppendLine($"  Blend shape weight transfer (Mesh -> Mesh): applied {appliedWeights} weight(s)");
@@ -3181,7 +3766,7 @@ namespace NDMFMerge.Editor
                 bool baseToOutfit = task.direction == BlendShapeTransferDirection.BaseToOutfit || 
                                     task.direction == BlendShapeTransferDirection.Bidirectional;
 
-                // Outfit → Base transfer
+                // Outfit -> Base transfer
                 if (outfitToBase)
                 {
                     var targetRenderers = targetArmature.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -3200,7 +3785,7 @@ namespace NDMFMerge.Editor
                     }
                 }
 
-                // Base → Outfit transfer
+                // Base -> Outfit transfer
                 if (baseToOutfit)
                 {
                     var outfitRenderers = outfitRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -3219,7 +3804,7 @@ namespace NDMFMerge.Editor
                     }
                 }
 
-                if (verbose && merger.logLevel >= 2)
+                if (verbose)
                     mergeLog.AppendLine($"  [Blend Shape Transfer] Complete: applied {appliedWeights} weight(s) ({task.direction})");
                 else if (appliedWeights > 0)
                     mergeLog.AppendLine($"  Blend shape weight transfer ({task.direction}): applied {appliedWeights} weight(s)");
@@ -3297,12 +3882,12 @@ namespace NDMFMerge.Editor
         }
 
         // [NEW FEATURE] Generate blend shapes from a task (new multi-task system)
-        private void GenerateBlendShapesFromTask(Transform avatarRoot, Transform targetArmature, BlendShapeTransferTask task, Dictionary<OutfitToMerge, Transform> clonedOutfitByEntry, Component targetCVRAvatar, CVRMergeArmature merger, BlendShapeTransferSettings settings)
+        private void GenerateBlendShapesFromTask(Transform avatarRoot, Transform targetArmature, BlendShapeTransferTask task, Dictionary<OutfitToMerge, Transform> clonedOutfitByEntry, Component targetCVRAvatar, CVRMergeArmature merger, BlendShapeTransferSettings settings, Dictionary<AnimationClip, AnimationClip> clipReplacementMap)
         {
             if (task == null || task.sourceGenerationMesh == null) return;
 
-            bool verbose = merger.verboseLogging || settings.verboseLogging;
-            if (verbose && merger.logLevel >= 2)
+            bool verbose = ShouldLogDetailed(merger);
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Blend Shape Generation] Starting generation task from source: {task.sourceGenerationMesh.name}");
 
             var sourceRenderer = ResolveRendererInCloneHierarchy(task.sourceGenerationMesh, avatarRoot);
@@ -3342,6 +3927,8 @@ namespace NDMFMerge.Editor
                 if (targetRenderer == null || targetRenderer.sharedMesh == null)
                 {
                     mergeLog.AppendLine("  Blend shape generation: Mesh -> Mesh target was not resolved in clone hierarchy");
+                    if (ShouldLogInfo(merger))
+                        mergeLog.AppendLine($"  [Blend Shape Generation] Complete: 0 total frame(s) created from {targetBlendShapeNames.Count} shapes");
                     return;
                 }
 
@@ -3351,11 +3938,11 @@ namespace NDMFMerge.Editor
                     totalGenerated += generated;
                     mergeLog.AppendLine($"    Generated {generated} blend shape(s) on mesh target: {targetRenderer.name}");
                     if (task.copyGeneratedBlendshapeAnimations)
-                        CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetRenderer, targetBlendShapeNames, merger, settings);
+                        CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetRenderer, targetBlendShapeNames, merger, settings, clipReplacementMap);
                 }
 
-                if (verbose && merger.logLevel >= 2)
-                    mergeLog.AppendLine($"  [Blend Shape Generation] Mesh -> Mesh complete: {totalGenerated} total frame(s) created");
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine($"  [Blend Shape Generation] Complete: {totalGenerated} total frame(s) created from {targetBlendShapeNames.Count} shapes");
                 else if (totalGenerated > 0)
                     mergeLog.AppendLine($"  Blend shape generation complete: {totalGenerated} total frame(s) created");
                 return;
@@ -3396,7 +3983,7 @@ namespace NDMFMerge.Editor
                         totalGenerated += generated;
                         mergeLog.AppendLine($"    Generated {generated} blend shape(s) on base mesh: {targetSMR.name}");
                         if (task.copyGeneratedBlendshapeAnimations)
-                            CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetSMR, targetBlendShapeNames, merger, settings);
+                            CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetSMR, targetBlendShapeNames, merger, settings, clipReplacementMap);
                     }
                 }
             }
@@ -3423,14 +4010,14 @@ namespace NDMFMerge.Editor
                             totalGenerated += generated;
                             mergeLog.AppendLine($"    Generated {generated} blend shape(s) on outfit '{outfitEntry.outfit.name}' mesh: {targetSMR.name}");
                             if (task.copyGeneratedBlendshapeAnimations)
-                                CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetSMR, targetBlendShapeNames, merger, settings);
+                                CopyGeneratedBlendshapeCurvesToTarget(targetCVRAvatar, avatarRoot, sourceRenderer, targetSMR, targetBlendShapeNames, merger, settings, clipReplacementMap);
 
                         }
                     }
                 }
             }
 
-            if (verbose && merger.logLevel >= 2)
+            if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Blend Shape Generation] Complete: {totalGenerated} total frame(s) created from {targetBlendShapeNames.Count} shapes");
             else if (totalGenerated > 0)
                 mergeLog.AppendLine($"  Blend shape generation complete: {totalGenerated} total frame(s) created");
@@ -3464,7 +4051,7 @@ namespace NDMFMerge.Editor
             int addedCount = 0;
             float topologySimilarity = useSmartFrameGeneration ? CalculateTopologySimilarity(srcMesh, dstMesh) : 1f;
 
-            // Build spatial hash for faster vertex mapping (O(n) instead of O(n²))
+            // Build spatial hash for faster vertex mapping (O(n) instead of O(n^2))
             var srcVerts = srcMesh.vertices;
             float cellSize = Mathf.Max(0.01f, maxMappingDistance / 2f);
             var spatialHash = BuildSpatialHash(srcVerts, cellSize);
@@ -3477,6 +4064,8 @@ namespace NDMFMerge.Editor
 
             int totalFramesProcessed = 0;
             int totalShapesProcessed = 0;
+
+            mergeLog.AppendLine($"  [Blend Shape Generation] Starting on '{srcSMR.name}' -> '{dstSMR.name}' for {blendShapeNames.Count} shape(s)...");
 
             foreach (var shapeName in blendShapeNames)
             {
@@ -3675,6 +4264,35 @@ namespace NDMFMerge.Editor
             return mesh;
         }
 
+        // Ensure MeshFilter uses a scene-local mesh before geometry edits.
+        private static Mesh EnsureSceneMeshInstance(MeshFilter meshFilter, string suffix)
+        {
+            if (meshFilter == null) return null;
+            var mesh = meshFilter.sharedMesh;
+            if (mesh == null) return null;
+            if (UnityEditor.EditorUtility.IsPersistent(mesh))
+            {
+                try
+                {
+                    var cloned = UnityEngine.Object.Instantiate(mesh);
+                    if (cloned == null)
+                    {
+                        Debug.LogError($"Failed to instantiate mesh {mesh.name}");
+                        return null;
+                    }
+                    cloned.name = mesh.name + " (" + (string.IsNullOrEmpty(suffix) ? "NDMF" : suffix) + ")";
+                    meshFilter.sharedMesh = cloned;
+                    return cloned;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"Exception while cloning mesh: {ex.Message}");
+                    return null;
+                }
+            }
+            return mesh;
+        }
+
         // === BUILD SPATIAL HASH for efficient vertex lookup ===
         private Dictionary<Vector3Int, List<int>> BuildSpatialHash(Vector3[] vertices, float cellSize)
         {
@@ -3755,6 +4373,283 @@ namespace NDMFMerge.Editor
             return current;
         }
 
+        private void ApplyAnimationClipReplacementsInClone(Transform avatarRoot, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, CVRMergeArmature merger)
+        {
+            if (avatarRoot == null || clipReplacementMap == null || clipReplacementMap.Count == 0) return;
+
+            int componentRefsUpdated = 0;
+            int controllerRefsUpdated = 0;
+            var visitedControllers = new HashSet<int>();
+            var controllerCloneMap = new Dictionary<RuntimeAnimatorController, RuntimeAnimatorController>();
+
+            var components = avatarRoot.GetComponentsInChildren<Component>(true);
+            foreach (var comp in components)
+            {
+                if (comp == null) continue;
+
+                try
+                {
+                    var so = new SerializedObject(comp);
+                    var prop = so.GetIterator();
+                    bool enterChildren = true;
+                    bool componentChanged = false;
+
+                    while (prop.Next(enterChildren))
+                    {
+                        enterChildren = true;
+
+                        if (prop.propertyType != SerializedPropertyType.ObjectReference &&
+                            prop.propertyType != SerializedPropertyType.ExposedReference)
+                            continue;
+
+                        var objRef = prop.objectReferenceValue;
+                        if (objRef is AnimationClip clip && clipReplacementMap.TryGetValue(clip, out var replacementClip) && replacementClip != null && replacementClip != clip)
+                        {
+                            prop.objectReferenceValue = replacementClip;
+                            componentRefsUpdated++;
+                            componentChanged = true;
+                            continue;
+                        }
+
+                        if (objRef is RuntimeAnimatorController runtimeController)
+                        {
+                            var mutableController = GetOrCreateMutableRuntimeAnimatorControllerCopy(runtimeController, controllerCloneMap);
+                            if (mutableController != runtimeController)
+                            {
+                                prop.objectReferenceValue = mutableController;
+                                componentRefsUpdated++;
+                                componentChanged = true;
+                                runtimeController = mutableController;
+                            }
+
+                            controllerRefsUpdated += ReplaceAnimationClipReferencesInRuntimeAnimatorController(runtimeController, clipReplacementMap, visitedControllers, controllerCloneMap);
+                        }
+                    }
+
+                    if (componentChanged)
+                    {
+                        so.ApplyModifiedPropertiesWithoutUndo();
+                        EditorUtility.SetDirty(comp);
+                    }
+                }
+                catch { }
+            }
+
+            foreach (var animator in avatarRoot.GetComponentsInChildren<Animator>(true))
+            {
+                if (animator != null && animator.runtimeAnimatorController != null)
+                {
+                    var mutableController = GetOrCreateMutableRuntimeAnimatorControllerCopy(animator.runtimeAnimatorController, controllerCloneMap);
+                    if (mutableController != animator.runtimeAnimatorController)
+                    {
+                        animator.runtimeAnimatorController = mutableController;
+                        componentRefsUpdated++;
+                        EditorUtility.SetDirty(animator);
+                    }
+
+                    controllerRefsUpdated += ReplaceAnimationClipReferencesInRuntimeAnimatorController(animator.runtimeAnimatorController, clipReplacementMap, visitedControllers, controllerCloneMap);
+                }
+            }
+
+            if (CVRAvatarType != null)
+            {
+                var avatars = avatarRoot.GetComponentsInChildren(CVRAvatarType, true).OfType<Component>();
+                foreach (var avatar in avatars)
+                {
+                    var preferredController = GetPreferredController(avatar);
+                    if (preferredController != null)
+                    {
+                        var mutableController = GetOrCreateMutableRuntimeAnimatorControllerCopy(preferredController, controllerCloneMap);
+                        if (mutableController != preferredController)
+                        {
+                            TrySetActualControllerOnAvatar(avatar, mutableController, avatarRoot);
+                            componentRefsUpdated++;
+                        }
+
+                        controllerRefsUpdated += ReplaceAnimationClipReferencesInRuntimeAnimatorController(mutableController, clipReplacementMap, visitedControllers, controllerCloneMap);
+                    }
+                }
+            }
+
+            if (ShouldLogInfo(merger))
+                mergeLog.AppendLine($"  [Animation Clip Copy] Rebound {clipReplacementMap.Count} modified clip(s), updated component refs: {componentRefsUpdated}, controller refs: {controllerRefsUpdated}");
+        }
+
+        private RuntimeAnimatorController GetOrCreateMutableRuntimeAnimatorControllerCopy(RuntimeAnimatorController controller, Dictionary<RuntimeAnimatorController, RuntimeAnimatorController> controllerCloneMap)
+        {
+            if (controller == null) return null;
+
+            if (controllerCloneMap.TryGetValue(controller, out var existingCopy) && existingCopy != null)
+                return existingCopy;
+
+            RuntimeAnimatorController mutableController = controller;
+            if (EditorUtility.IsPersistent(controller))
+            {
+                mutableController = UnityEngine.Object.Instantiate(controller);
+                mutableController.name = controller.name + " (NDMF Modified)";
+            }
+
+            controllerCloneMap[controller] = mutableController;
+            return mutableController;
+        }
+
+        private int ReplaceAnimationClipReferencesInRuntimeAnimatorController(RuntimeAnimatorController controller, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, HashSet<int> visitedControllers, Dictionary<RuntimeAnimatorController, RuntimeAnimatorController> controllerCloneMap)
+        {
+            if (controller == null || clipReplacementMap == null || clipReplacementMap.Count == 0) return 0;
+
+            if (!visitedControllers.Add(controller.GetInstanceID()))
+                return 0;
+
+            if (controller is AnimatorOverrideController overrideController)
+                return ReplaceAnimationClipReferencesInAnimatorOverrideController(overrideController, clipReplacementMap, visitedControllers, controllerCloneMap);
+
+            if (controller is AnimatorController animatorController)
+                return ReplaceAnimationClipReferencesInAnimatorController(animatorController, clipReplacementMap);
+
+            return 0;
+        }
+
+        private int ReplaceAnimationClipReferencesInAnimatorOverrideController(AnimatorOverrideController overrideController, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, HashSet<int> visitedControllers, Dictionary<RuntimeAnimatorController, RuntimeAnimatorController> controllerCloneMap)
+        {
+            if (overrideController == null) return 0;
+
+            int replaced = 0;
+            if (overrideController.runtimeAnimatorController != null)
+            {
+                var mutableBaseController = GetOrCreateMutableRuntimeAnimatorControllerCopy(overrideController.runtimeAnimatorController, controllerCloneMap);
+                if (mutableBaseController != overrideController.runtimeAnimatorController)
+                {
+                    overrideController.runtimeAnimatorController = mutableBaseController;
+                    EditorUtility.SetDirty(overrideController);
+                }
+
+                replaced += ReplaceAnimationClipReferencesInRuntimeAnimatorController(overrideController.runtimeAnimatorController, clipReplacementMap, visitedControllers, controllerCloneMap);
+            }
+
+            var overrides = new List<KeyValuePair<AnimationClip, AnimationClip>>();
+            overrideController.GetOverrides(overrides);
+
+            bool changed = false;
+            for (int i = 0; i < overrides.Count; i++)
+            {
+                var entry = overrides[i];
+                if (entry.Value != null && clipReplacementMap.TryGetValue(entry.Value, out var replacementClip) && replacementClip != null && replacementClip != entry.Value)
+                {
+                    overrides[i] = new KeyValuePair<AnimationClip, AnimationClip>(entry.Key, replacementClip);
+                    replaced++;
+                    changed = true;
+                }
+            }
+
+            if (changed)
+            {
+                overrideController.ApplyOverrides(overrides);
+                EditorUtility.SetDirty(overrideController);
+            }
+
+            return replaced;
+        }
+
+        private int ReplaceAnimationClipReferencesInAnimatorController(AnimatorController controller, Dictionary<AnimationClip, AnimationClip> clipReplacementMap)
+        {
+            if (controller == null) return 0;
+
+            int replaced = 0;
+            foreach (var layer in controller.layers)
+            {
+                if (layer?.stateMachine != null)
+                    replaced += ReplaceAnimationClipReferencesInStateMachine(layer.stateMachine, clipReplacementMap);
+            }
+
+            if (replaced > 0)
+                EditorUtility.SetDirty(controller);
+
+            return replaced;
+        }
+
+        private int ReplaceAnimationClipReferencesInStateMachine(AnimatorStateMachine stateMachine, Dictionary<AnimationClip, AnimationClip> clipReplacementMap)
+        {
+            if (stateMachine == null) return 0;
+
+            int replaced = 0;
+            foreach (var state in stateMachine.states)
+            {
+                if (state.state == null || state.state.motion == null) continue;
+
+                if (ReplaceAnimationClipReferencesInMotion(state.state.motion, clipReplacementMap, out var replacementMotion, out var motionReplacements))
+                {
+                    state.state.motion = replacementMotion;
+                    EditorUtility.SetDirty(state.state);
+                    replaced += motionReplacements;
+                }
+            }
+
+            foreach (var childStateMachine in stateMachine.stateMachines)
+            {
+                if (childStateMachine.stateMachine != null)
+                    replaced += ReplaceAnimationClipReferencesInStateMachine(childStateMachine.stateMachine, clipReplacementMap);
+            }
+
+            if (replaced > 0)
+                EditorUtility.SetDirty(stateMachine);
+
+            return replaced;
+        }
+
+        private bool ReplaceAnimationClipReferencesInMotion(Motion motion, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, out Motion replacementMotion, out int replacedCount)
+        {
+            replacementMotion = motion;
+            replacedCount = 0;
+            if (motion == null || clipReplacementMap == null || clipReplacementMap.Count == 0) return false;
+
+            if (motion is AnimationClip clip)
+            {
+                if (clipReplacementMap.TryGetValue(clip, out var replacementClip) && replacementClip != null && replacementClip != clip)
+                {
+                    replacementMotion = replacementClip;
+                    replacedCount = 1;
+                    return true;
+                }
+
+                return false;
+            }
+
+            if (motion is BlendTree blendTree)
+            {
+                var children = blendTree.children;
+                var rewrittenChildren = new Motion[children.Length];
+                bool anyChanged = false;
+
+                for (int i = 0; i < children.Length; i++)
+                {
+                    rewrittenChildren[i] = children[i].motion;
+                    if (ReplaceAnimationClipReferencesInMotion(children[i].motion, clipReplacementMap, out var childMotion, out var childReplacedCount))
+                    {
+                        rewrittenChildren[i] = childMotion;
+                        replacedCount += childReplacedCount;
+                        anyChanged = true;
+                    }
+                }
+
+                if (!anyChanged) return false;
+
+                var clonedTree = UnityEngine.Object.Instantiate(blendTree);
+                clonedTree.name = blendTree.name + " (NDMF Modified)";
+                var clonedChildren = clonedTree.children;
+                for (int i = 0; i < clonedChildren.Length; i++)
+                {
+                    var child = clonedChildren[i];
+                    child.motion = rewrittenChildren[i];
+                    clonedChildren[i] = child;
+                }
+                clonedTree.children = clonedChildren;
+                replacementMotion = clonedTree;
+                return true;
+            }
+
+            return false;
+        }
+
         private string GetPathRelativeToRoot(Transform root, Transform target)
         {
             if (root == null || target == null) return null;
@@ -3772,7 +4667,7 @@ namespace NDMFMerge.Editor
             return string.Join("/", parts);
         }
 
-        private void CopyGeneratedBlendshapeCurvesToTarget(Component targetCVRAvatar, Transform avatarRoot, SkinnedMeshRenderer sourceRenderer, SkinnedMeshRenderer targetRenderer, HashSet<string> shapeNames, CVRMergeArmature merger, BlendShapeTransferSettings settings)
+        private void CopyGeneratedBlendshapeCurvesToTarget(Component targetCVRAvatar, Transform avatarRoot, SkinnedMeshRenderer sourceRenderer, SkinnedMeshRenderer targetRenderer, HashSet<string> shapeNames, CVRMergeArmature merger, BlendShapeTransferSettings settings, Dictionary<AnimationClip, AnimationClip> clipReplacementMap)
         {
             if (targetCVRAvatar == null || avatarRoot == null || sourceRenderer == null || targetRenderer == null || shapeNames == null || shapeNames.Count == 0)
                 return;
@@ -3793,7 +4688,11 @@ namespace NDMFMerge.Editor
                 if (clip == null) continue;
                 bool clipChanged = false;
 
-                var bindings = AnimationUtility.GetCurveBindings(clip);
+                var workingClip = clipReplacementMap != null && clipReplacementMap.TryGetValue(clip, out var existingCopy) && existingCopy != null
+                    ? existingCopy
+                    : clip;
+
+                var bindings = AnimationUtility.GetCurveBindings(workingClip);
                 foreach (var shapeName in shapeNames)
                 {
                     if (string.IsNullOrWhiteSpace(shapeName)) continue;
@@ -3803,46 +4702,34 @@ namespace NDMFMerge.Editor
                     if (targetAlreadyExists) continue;
 
                     EditorCurveBinding template = default;
-                    bool foundTemplate = false;
+                    if (string.IsNullOrEmpty(sourcePath)) continue;
 
-                    if (!string.IsNullOrEmpty(sourcePath))
+                    template = bindings.FirstOrDefault(b => b.type == typeof(SkinnedMeshRenderer) && b.path == sourcePath && b.propertyName == propertyName);
+                    if (string.IsNullOrEmpty(template.propertyName)) continue;
+
+                    if (!clipChanged)
                     {
-                        var sourceBinding = bindings.FirstOrDefault(b => b.type == typeof(SkinnedMeshRenderer) && b.path == sourcePath && b.propertyName == propertyName);
-                        if (!string.IsNullOrEmpty(sourceBinding.propertyName))
-                        {
-                            template = sourceBinding;
-                            foundTemplate = true;
-                        }
+                        workingClip = GetOrCreateModifiedClipCopy(clip, clipReplacementMap);
+                        bindings = AnimationUtility.GetCurveBindings(workingClip);
+                        template = bindings.FirstOrDefault(b => b.type == typeof(SkinnedMeshRenderer) && b.path == sourcePath && b.propertyName == propertyName);
+                        if (string.IsNullOrEmpty(template.propertyName)) continue;
                     }
 
-                    if (!foundTemplate)
-                    {
-                        var anyBinding = bindings.FirstOrDefault(b => b.type == typeof(SkinnedMeshRenderer) && b.propertyName == propertyName);
-                        if (!string.IsNullOrEmpty(anyBinding.propertyName))
-                        {
-                            template = anyBinding;
-                            foundTemplate = true;
-                        }
-                    }
-
-                    if (!foundTemplate) continue;
-
-                    var curve = AnimationUtility.GetEditorCurve(clip, template);
+                    var curve = AnimationUtility.GetEditorCurve(workingClip, template);
                     if (curve == null) continue;
 
                     var newBinding = template;
                     newBinding.path = targetPath;
-                    AnimationUtility.SetEditorCurve(clip, newBinding, curve);
+                    AnimationUtility.SetEditorCurve(workingClip, newBinding, curve);
                     clipChanged = true;
                     copiedCurves++;
                 }
 
                 if (clipChanged)
-                    EditorUtility.SetDirty(clip);
+                    EditorUtility.SetDirty(workingClip);
             }
 
-            bool verbose = merger != null && (merger.verboseLogging || (settings != null && settings.verboseLogging));
-            if (verbose && copiedCurves > 0)
+            if (copiedCurves > 0 && ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Blend Shape Animation Copy] Added {copiedCurves} curve(s) for target mesh '{targetRenderer.name}'");
         }
 
@@ -4089,9 +4976,9 @@ namespace NDMFMerge.Editor
         {
             if (settings == null || !settings.enable) return;
             
-            bool verbose = merger.verboseLogging || settings.verboseLogging;
+            bool verbose = ShouldLogDetailed(merger);
             
-            if (verbose && merger.logLevel >= 2)
+            if (verbose)
                 mergeLog.AppendLine("  [Semantic Bone Matching] Applying advanced matching...");
             int matchCount = 0;
             
@@ -4170,7 +5057,7 @@ namespace NDMFMerge.Editor
                 }
             }
             
-            if (verbose && merger.logLevel >= 2)
+            if (verbose)
                 mergeLog.AppendLine($"  [Semantic Bone Matching] Complete: {matchCount} additional matches found");
         }
 
@@ -4178,9 +5065,9 @@ namespace NDMFMerge.Editor
         {
             if (settings == null || !settings.enable || targetArmature == null) return;
             
-            bool verbose = merger.verboseLogging || settings.verboseLogging;
+            bool verbose = ShouldLogDetailed(merger);
             
-            if (verbose && merger.logLevel >= 2)
+            if (verbose)
                 mergeLog.AppendLine("  [Bone Chain Validation] Checking bone chains...");
             
             var commonChains = new[]
@@ -4204,7 +5091,7 @@ namespace NDMFMerge.Editor
                     {
                         if (settings.warnOnMissing)
                         {
-                            mergeLog.AppendLine($"    ⚠ Missing bone '{chain[i]}' in chain at step {i}");
+                            mergeLog.AppendLine($"    WARNING: Missing bone '{chain[i]}' in chain at step {i}");
                             brokenChains++;
                         }
                         break;
@@ -4213,7 +5100,7 @@ namespace NDMFMerge.Editor
                 }
             }
             
-            if (verbose && merger.logLevel >= 2)
+            if (verbose)
                 mergeLog.AppendLine($"  [Bone Chain Validation] Complete: {brokenChains} broken chains detected");
         }
 
@@ -4221,9 +5108,9 @@ namespace NDMFMerge.Editor
         {
             if (settings == null) return;
             
-            bool verbose = merger.verboseLogging || settings.verboseLogging;
+            bool verbose = ShouldLogDetailed(merger);
             
-            if (verbose && merger.logLevel >= 2)
+            if (verbose)
                 mergeLog.AppendLine("  [Pre-Merge Validation] Running checks...");
             int issues = 0;
             
@@ -4234,7 +5121,7 @@ namespace NDMFMerge.Editor
                 {
                     if (bone == null)
                     {
-                        mergeLog.AppendLine("    ⚠ NULL bone reference detected");
+                        mergeLog.AppendLine("    WARNING: NULL bone reference detected");
                         issues++;
                     }
                 }
@@ -4247,13 +5134,13 @@ namespace NDMFMerge.Editor
                 {
                     if (smr.sharedMesh == null)
                     {
-                        mergeLog.AppendLine($"    ⚠ Missing mesh on {smr.name}");
+                        mergeLog.AppendLine($"    WARNING: Missing mesh on {smr.name}");
                         issues++;
                     }
                 }
             }
             
-            if (verbose && merger.logLevel >= 2)
+            if (verbose)
                 mergeLog.AppendLine($"  [Pre-Merge Validation] Complete: {issues} issues found");
         }
 
@@ -4261,9 +5148,9 @@ namespace NDMFMerge.Editor
         {
             if (settings == null || ctx?.AvatarRootTransform == null) return;
             
-            bool verbose = merger.verboseLogging || settings.verboseLogging;
+            bool verbose = ShouldLogDetailed(merger);
             
-            if (verbose && merger.logLevel >= 2)
+            if (verbose)
                 mergeLog.AppendLine("[Post-Merge Verification] Running checks...");
             int warnings = 0;
             
@@ -4274,7 +5161,7 @@ namespace NDMFMerge.Editor
                 {
                     if (smr.localBounds.size.magnitude < 0.01f)
                     {
-                        mergeLog.AppendLine($"  ⚠ Suspicious bounds on {smr.name}: {smr.localBounds.size}");
+                        mergeLog.AppendLine($"  WARNING: Suspicious bounds on {smr.name}: {smr.localBounds.size}");
                         warnings++;
                     }
                 }
@@ -4284,11 +5171,11 @@ namespace NDMFMerge.Editor
             {
                 var allSmr = ctx.AvatarRootTransform.GetComponentsInChildren<SkinnedMeshRenderer>(true);
                 int withProbes = allSmr.Count(s => s.probeAnchor != null);
-                if (verbose && merger.logLevel >= 2)
+                if (verbose)
                     mergeLog.AppendLine($"  Probe anchors set: {withProbes}/{allSmr.Length}");
             }
             
-            if (verbose && merger.logLevel >= 2)
+            if (verbose)
                 mergeLog.AppendLine($"[Post-Merge Verification] Complete: {warnings} warnings");
         }
 
@@ -4328,3 +5215,5 @@ namespace NDMFMerge.Editor
         }
     }
 }
+
+
