@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -11,7 +11,7 @@ namespace NDMFMerge.Runtime
     {
         [Header("Logging")]
         [Tooltip("Enable verbose logging for UV validation operations.")]
-        public bool verboseLogging = false;
+        [HideInInspector] public bool verboseLogging = false;
 
         [Header("Settings")]
         [Tooltip("If missing UVs are detected, generate simple defaults.")]
@@ -29,7 +29,7 @@ namespace NDMFMerge.Runtime
     {
         [Header("Logging")]
         [Tooltip("Enable verbose logging for material consolidation.")]
-        public bool verboseLogging = false;
+        [HideInInspector] public bool verboseLogging = false;
 
         [Header("Settings")]
         [Tooltip("Consolidate materials by shader + main texture.")]
@@ -137,7 +137,7 @@ namespace NDMFMerge.Runtime
     {
         [Header("Logging")]
         [Tooltip("Enable verbose logging for blend shape transfer operations.")]
-        public bool verboseLogging = false;
+        [HideInInspector] public bool verboseLogging = false;
 
         [Tooltip("List of blend shape tasks to execute.")]
         public List<BlendShapeTransferTask> tasks = new List<BlendShapeTransferTask>();
@@ -221,16 +221,16 @@ namespace NDMFMerge.Runtime
 
     public enum BlendShapeTransferDirection
     {
-        [InspectorName("Outfit → Base")]
+        [InspectorName("Outfit -> Base")]
         OutfitToBase = 0,
 
-        [InspectorName("Base → Outfit")]
+        [InspectorName("Base -> Outfit")]
         BaseToOutfit = 1,
 
         [InspectorName("Both Directions")]
         Bidirectional = 2,
 
-        [InspectorName("Mesh → Mesh")]
+        [InspectorName("Mesh -> Mesh")]
         MeshToMesh = 3
     }
 
@@ -288,7 +288,7 @@ namespace NDMFMerge.Runtime
     {
         [Header("Logging")]
         [Tooltip("Enable verbose logging for semantic bone matching.")]
-        public bool verboseLogging = false;
+        [HideInInspector] public bool verboseLogging = false;
 
         [Header("Settings")]
         [Tooltip("Enable semantic bone matching using synonyms (e.g., 'pelvis' -> 'Hips').")]
@@ -320,7 +320,7 @@ namespace NDMFMerge.Runtime
     {
         [Header("Logging")]
         [Tooltip("Enable verbose logging for bone chain validation.")]
-        public bool verboseLogging = false;
+        [HideInInspector] public bool verboseLogging = false;
 
         [Header("Settings")]
         [Tooltip("Enable validation of common bone chains (e.g., spine, legs, arms).")]
@@ -335,7 +335,7 @@ namespace NDMFMerge.Runtime
     {
         [Header("Logging")]
         [Tooltip("Enable verbose logging for pre-merge validation.")]
-        public bool verboseLogging = false;
+        [HideInInspector] public bool verboseLogging = false;
 
         [Header("Settings")]
         [Tooltip("Check for missing bones referenced by meshes before merge.")]
@@ -350,7 +350,7 @@ namespace NDMFMerge.Runtime
     {
         [Header("Logging")]
         [Tooltip("Enable verbose logging for post-merge verification.")]
-        public bool verboseLogging = false;
+        [HideInInspector] public bool verboseLogging = false;
 
         [Header("Settings")]
         [Tooltip("Verify bounds were applied and look sane after merge.")]
@@ -409,7 +409,7 @@ namespace NDMFMerge.Runtime
         [InspectorName("Merge Into Selected...")]
         MergeIntoSelected,
 
-        [InspectorName("Constraint To Target (Safe)")]
+        [InspectorName("As child, keep position and rotation")]
         ConstraintToTarget
     }
 
@@ -537,6 +537,82 @@ namespace NDMFMerge.Runtime
         public bool autoFixed;
     }
 
+    public enum ArmatureScaleNormalizationScope
+    {
+        [InspectorName("Outfits Only")]
+        OutfitsOnly = 0,
+
+        [InspectorName("Base + Outfits")]
+        BaseAndOutfits = 1
+    }
+
+    public enum ArmatureScaleNormalizationMode
+    {
+        [InspectorName("Scale Only (Legacy)")]
+        ScaleOnly = 0,
+
+        [InspectorName("Apply Transform-Like")]
+        ApplyTransformLike = 1
+    }
+
+    public enum MergeLoggingLevel
+    {
+        [InspectorName("Errors Only")]
+        ErrorsOnly = 0,
+
+        [InspectorName("Errors + Warnings")]
+        ErrorsAndWarnings = 1,
+
+        [InspectorName("All Details")]
+        AllDetails = 2
+    }
+
+    public enum MergeVerboseMode
+    {
+        [InspectorName("Simple")]
+        Simple = 0,
+
+        [InspectorName("Detailed")]
+        Detailed = 1
+    }
+
+    [Serializable]
+    public class ArmatureMergingSettings
+    {
+        [Tooltip("Enable transform normalization before armature merging to reduce distortion.")]
+        public bool enableScaleNormalization = true;
+
+        [Tooltip("Choose whether normalization is applied to outfit clones only or also to the base avatar armature during build.")]
+        public ArmatureScaleNormalizationScope normalizationScope = ArmatureScaleNormalizationScope.OutfitsOnly;
+
+        [Tooltip("Scale Only bakes local scale into children. Apply Transform-Like keeps bones/other objects stable while baking selected position/rotation into mesh data (including skinned meshes with bindpose updates).")]
+        public ArmatureScaleNormalizationMode normalizationMode = ArmatureScaleNormalizationMode.ScaleOnly;
+
+        [Tooltip("When enabled, local scale is baked through the full hierarchy (including bones and non-mesh objects) so world appearance stays unchanged.")]
+        public bool applyScaleToAllTransforms = false;
+
+        [Tooltip("Protect bone chains used by skinned meshes from normalization. Disable only for advanced debugging.")]
+        public bool protectSkinnedSkeleton = true;
+
+        [Tooltip("In Apply Transform-Like mode, bake local POSITION into static meshes (MeshFilter) and then reset mesh transform position.")]
+        public bool applyPositionToStaticMeshes = true;
+
+        [Tooltip("In Apply Transform-Like mode, bake local ROTATION into static meshes (MeshFilter) and then reset mesh transform rotation.")]
+        public bool applyRotationToStaticMeshes = true;
+
+        [Tooltip("In Apply Transform-Like mode, bake local POSITION into skinned meshes and update bindposes so deformation remains stable.")]
+        public bool applyPositionToSkinnedMeshes = true;
+
+        [Tooltip("In Apply Transform-Like mode, bake local ROTATION into skinned meshes and update bindposes so deformation remains stable.")]
+        public bool applyRotationToSkinnedMeshes = true;
+
+        [Tooltip("When remapping SkinnedMeshRenderer bones, bake source->target transform delta into bindposes to preserve mesh shape.")]
+        public bool compensateBindposesOnBoneRemap = true;
+
+        [Tooltip("Also apply bindpose compensation to non-conflict mappings (e.g., name/fuzzy matches). Disable to only compensate explicit conflict entries.")]
+        public bool compensateAutoMappedBones = true;
+    }
+
     [ExecuteInEditMode]
     [AddComponentMenu("NDMF Merge/CVR Merge Armature")]
     [DisallowMultipleComponent]
@@ -571,8 +647,13 @@ namespace NDMFMerge.Runtime
 
         [Space(10)]
         [Header("Component Merging Options")]
-        [Tooltip("If checked, attempts to normalize parent scales before merging to prevent 'exploding' meshes.")]
-        public bool preventScaleDistortion = true;
+        [Header("Armature Merging")]
+        [Tooltip("Settings controlling how transform normalization is applied before armature merging.")]
+        public ArmatureMergingSettings armatureMergingSettings = new ArmatureMergingSettings();
+
+        [FormerlySerializedAs("preventScaleDistortion")]
+        [SerializeField, HideInInspector] private bool legacyPreventScaleDistortion = true;
+        [SerializeField, HideInInspector] private bool armatureSettingsMigrated = false;
 
         [Tooltip("Merge DynamicBone components")]
         public bool mergeDynamicBones = true;
@@ -690,12 +771,19 @@ namespace NDMFMerge.Runtime
         // DEBUG & LOGGING SETTINGS
         // =======================
         [Header("Debug & Logging")]
-        [Tooltip("Enable verbose logging for detailed merge operations")]
-        public bool verboseLogging = false;
+        [Tooltip("Controls which log severities are emitted during merge operations.")]
+        public MergeLoggingLevel loggingLevel = MergeLoggingLevel.ErrorsOnly;
 
-        [Tooltip("Log level: 0=Errors Only, 1=Warnings+Errors, 2=All Details")]
-        [Range(0, 2)]
-        public int logLevel = 2;
+        [Tooltip("Controls verbosity style. Simple keeps logs concise. Detailed includes debug-heavy per-step output.")]
+        public MergeVerboseMode verboseMode = MergeVerboseMode.Simple;
+
+        [FormerlySerializedAs("verboseLogging")]
+        [SerializeField, HideInInspector] public bool legacyVerboseLogging = false;
+
+        [FormerlySerializedAs("logLevel")]
+        [SerializeField, HideInInspector] public int legacyLogLevel = 2;
+
+        [SerializeField, HideInInspector] private bool loggingSettingsMigrated = false;
 
         // ========================================
         // CVR REFLECTION HELPER METHODS (EMBEDDED)
@@ -778,6 +866,22 @@ namespace NDMFMerge.Runtime
 
         private void OnValidate()
         {
+            if (armatureMergingSettings == null)
+                armatureMergingSettings = new ArmatureMergingSettings();
+
+            if (!armatureSettingsMigrated)
+            {
+                armatureMergingSettings.enableScaleNormalization = legacyPreventScaleDistortion;
+                armatureSettingsMigrated = true;
+            }
+
+            if (!loggingSettingsMigrated)
+            {
+                loggingLevel = (MergeLoggingLevel)Mathf.Clamp(legacyLogLevel, 0, 2);
+                verboseMode = legacyVerboseLogging ? MergeVerboseMode.Detailed : MergeVerboseMode.Simple;
+                loggingSettingsMigrated = true;
+            }
+
             if (GetCVRAvatar() == null && !Application.isPlaying)
             {
                 Debug.LogWarning($"[CVR Merge Armature] This GameObject must have a CVRAvatar component!", this);
@@ -856,3 +960,4 @@ namespace NDMFMerge.Runtime
         }
     }
 }
+
