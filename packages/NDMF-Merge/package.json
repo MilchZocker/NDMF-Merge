@@ -1,7 +1,7 @@
 {
   "name": "dev.milchzocker.ndmf-merge",
   "displayName": "NDMF Merge",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "unity": "2021.3",
   "description": "NDMF-based armature merging for ChilloutVR - Modular Avatar without Modular Avatar",
   "author": {
