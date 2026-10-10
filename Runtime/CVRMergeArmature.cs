@@ -267,7 +267,7 @@ namespace NDMFMerge.Runtime
         [Tooltip("Target object on the base avatar where this outfit/object will be parented.")]
         public Transform targetParent;
 
-        [Tooltip("Target bone used by the weighting placement mode.")]
+        [Tooltip("Required base-avatar bone for weighting mode. Existing bones attach beneath it with world pose and skin weights preserved; unskinned meshes are weighted to it. Meshes and non-bone empty objects remain under the avatar root.")]
         public Transform targetBone;
 
         [Tooltip("Reference object used by reference placement mode.")]

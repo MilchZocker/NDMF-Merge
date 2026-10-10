@@ -220,14 +220,18 @@ namespace NDMFMerge.Editor
                         DrawSubsectionLabel("Object Mode Target");
                         var objectSettings = element.FindPropertyRelative("objectMergeSettings");
                         EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("placementMode"), new GUIContent("Positioning Mode"));
-                        EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("targetParent"), new GUIContent("Target GameObject"));
 
                         var placementModeProp = objectSettings.FindPropertyRelative("placementMode");
                         var placementMode = (ObjectPlacementMode)placementModeProp.enumValueIndex;
+                        if (placementMode != ObjectPlacementMode.WeightMeshesToTargetBoneAtCurrentPosition)
+                            EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("targetParent"), new GUIContent("Target GameObject"));
 
                         if (placementMode == ObjectPlacementMode.WeightMeshesToTargetBoneAtCurrentPosition)
                         {
                             EditorGUILayout.PropertyField(objectSettings.FindPropertyRelative("targetBone"), new GUIContent("Target Bone"));
+                            EditorGUILayout.HelpBox("Attach the existing bone hierarchy beneath this bone without changing its world pose or skin weights. Meshes and non-bone empty objects stay under the avatar root. Unskinned meshes are weighted fully to this bone.", MessageType.Info);
+                            if (objectSettings.FindPropertyRelative("targetBone").objectReferenceValue == null)
+                                EditorGUILayout.HelpBox("Select a Target Bone on the base avatar.", MessageType.Error);
                         }
                         else if (placementMode == ObjectPlacementMode.PlaceUsingReference)
                         {
