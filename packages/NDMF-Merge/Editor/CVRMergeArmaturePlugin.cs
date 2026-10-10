@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -29,7 +29,6 @@ namespace NDMFMerge.Editor
         private const string ROOT_GEN_FOLDER = "Assets/NDMF Merge Generated";
 
         private StringBuilder mergeLog = new StringBuilder();
-        private static readonly HashSet<int> _aasGeneratedForAvatarInstance = new HashSet<int>();
         private static readonly Dictionary<string, Type> _typeCache = new Dictionary<string, Type>();
 
         private static bool ShouldLogWarnings(CVRMergeArmature merger)
@@ -125,6 +124,95 @@ namespace NDMFMerge.Editor
             return component.GetType() == CVRAvatarType;
         }
 
+        private static bool SetAvatarOverrideController(Component cvrAvatar, RuntimeAnimatorController controller)
+        {
+            if (cvrAvatar == null) return false;
+
+            bool setSuccessfully = false;
+
+            try
+            {
+                var so = new SerializedObject(cvrAvatar);
+                so.Update();
+                string[] possiblePropNames = new[] { "overrides", "animationOverrides", "avatarOverrideController" };
+                foreach (var propName in possiblePropNames)
+                {
+                    var prop = so.FindProperty(propName);
+                    if (prop != null)
+                    {
+                        prop.objectReferenceValue = controller;
+                        so.ApplyModifiedProperties();
+                        setSuccessfully = true;
+                        break;
+                    }
+                }
+            }
+            catch { }
+
+            var t = cvrAvatar.GetType();
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            string[] possibleMemberNames = new[] { "overrides", "animationOverrides", "avatarOverrideController" };
+
+            foreach (var name in possibleMemberNames)
+            {
+                var f = t.GetField(name, flags);
+                if (f != null && typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType))
+                {
+                    f.SetValue(cvrAvatar, controller);
+                    setSuccessfully = true;
+                }
+
+                var p = t.GetProperty(name, flags);
+                if (p != null && p.CanWrite && typeof(UnityEngine.Object).IsAssignableFrom(p.PropertyType))
+                {
+                    p.SetValue(cvrAvatar, controller, null);
+                    setSuccessfully = true;
+                }
+            }
+
+            if (setSuccessfully)
+            {
+                EditorUtility.SetDirty(cvrAvatar);
+            }
+
+            return setSuccessfully;
+        }
+
+        private static AnimatorOverrideController GetAvatarOverrideController(Component cvrAvatar)
+        {
+            if (cvrAvatar == null) return null;
+
+            try
+            {
+                var so = new SerializedObject(cvrAvatar);
+                string[] possiblePropNames = new[] { "overrides", "animationOverrides", "avatarOverrideController" };
+                foreach (var propName in possiblePropNames)
+                {
+                    var prop = so.FindProperty(propName);
+                    if (prop != null && prop.objectReferenceValue is AnimatorOverrideController aoc)
+                        return aoc;
+                }
+            }
+            catch { }
+
+            var t = cvrAvatar.GetType();
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            string[] possibleMemberNames = new[] { "overrides", "animationOverrides", "avatarOverrideController" };
+
+            foreach (var name in possibleMemberNames)
+            {
+                var f = t.GetField(name, flags);
+                if (f != null && f.GetValue(cvrAvatar) is AnimatorOverrideController aocF)
+                    return aocF;
+
+                var p = t.GetProperty(name, flags);
+                if (p != null && p.GetValue(cvrAvatar, null) is AnimatorOverrideController aocP)
+                    return aocP;
+            }
+
+            return null;
+        }
+
         protected override void Configure()
         {
             InPhase(BuildPhase.Resolving)
@@ -164,11 +252,11 @@ namespace NDMFMerge.Editor
             InPhase(BuildPhase.Transforming)
                 .Run("Generate AAS Controller At End", ctx =>
                 {
-                    AssetDatabase.StartAssetEditing();
                     try
                     {
                         var mergeComponents = ctx.AvatarRootTransform.GetComponentsInChildren<CVRMergeArmature>(true);
 
+                        var generatedAvatars = new HashSet<int>();
                         foreach (var merger in mergeComponents)
                         {
                             if (merger == null || !merger.generateAASControllerAtEnd || !merger.mergeAdvancedAvatarSetup) continue;
@@ -177,14 +265,14 @@ namespace NDMFMerge.Editor
                             if (cvrAvatar == null) continue;
 
                             int id = cvrAvatar.GetInstanceID();
-                            if (_aasGeneratedForAvatarInstance.Contains(id)) continue;
-                            _aasGeneratedForAvatarInstance.Add(id);
+                            if (!generatedAvatars.Add(id)) continue;
 
                             try { GenerateAASControllerAtEnd(cvrAvatar, ctx.AvatarRootTransform, merger); }
                             catch (Exception ex)
                             {
                                 mergeLog.AppendLine($"AAS end-gen: CreateAASController invoke failed: {ex.Message}");
-                                Debug.LogError($"[NDMF Merge] AAS controller generation failed: {ex.Message}\n{ex.StackTrace}", merger);
+                                Debug.LogError($"[NDMF Merge] AAS controller generation failed: {ex}", merger);
+                                throw;
                             }
                         }
 
@@ -196,8 +284,8 @@ namespace NDMFMerge.Editor
                     }
                     finally
                     {
-                        AssetDatabase.StopAssetEditing();
                         AssetDatabase.SaveAssets();
+                        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                     }
                 });
         }
@@ -227,7 +315,6 @@ namespace NDMFMerge.Editor
                 NormalizeTransformsBeforeMerge(targetArmature, merger, armatureSettings, "base armature", ctx.AvatarRootTransform);
             }
 
-            // Per-outfit bounds reference will be selected individually (CopyFromSelected)
             SkinnedMeshRenderer bodyReferenceMesh = null;
 
             var clonedOutfits = new List<Transform>();
@@ -244,7 +331,6 @@ namespace NDMFMerge.Editor
                     clonedOutfit.name = outfitEntry.outfit.name;
                     clonedOutfit.transform.SetParent(ctx.AvatarRootTransform, false);
 
-                    // [NEW FEATURE] Force scale to (1,1,1)
                     if (outfitEntry.forceScaleToOne)
                     {
                         clonedOutfit.transform.localScale = Vector3.one;
@@ -277,7 +363,6 @@ namespace NDMFMerge.Editor
 
             if (merger.mergeAdvancedAvatarSetup && clonedOutfits.Count > 0)
             {
-                // SAFETY: Get the CVRAvatar from within the cloned hierarchy, not the original
                 var clonedCVRAvatar = ctx.AvatarRootTransform.GetComponentInChildren(cvrAvatar.GetType(), true);
                 if (clonedCVRAvatar != null)
                 {
@@ -330,9 +415,7 @@ namespace NDMFMerge.Editor
                 RebuildMagicaData(ctx.AvatarRootTransform, merger);
                 if (ShouldLogInfo(merger))
                     mergeLog.AppendLine("Post-merge finalization complete (universal reference remap + Magica rebuild).");
-                // Post-merge verification
                 RunPostMergeVerification(ctx, merger, merger.postMergeVerificationSettings);
-                // Bone chain validation on final armature
                 ValidateBoneChains(targetArmature, merger.boneChainValidationSettings, merger);
             }
             catch (Exception ex)
@@ -349,7 +432,6 @@ namespace NDMFMerge.Editor
                 : new ArmatureMergingSettings();
         }
 
-        // [NEW FEATURE] Transform normalization to reduce distortion before merge.
         private void NormalizeTransformsBeforeMerge(Transform root, CVRMergeArmature merger, ArmatureMergingSettings settings, string subjectLabel, Transform skinnedMeshSearchRoot = null)
         {
             if (root == null || settings == null) return;
@@ -513,7 +595,6 @@ namespace NDMFMerge.Editor
                 {
                     if (bone == null) continue;
 
-                    // Only protect bones that are actually inside the normalization subtree.
                     if (!bone.IsChildOf(normalizeRoot) && bone != normalizeRoot)
                         continue;
 
@@ -619,7 +700,6 @@ namespace NDMFMerge.Editor
             return true;
         }
 
-        // [NEW FEATURE] Find body mesh for bounds copying
         private SkinnedMeshRenderer FindBodyReferenceMesh(Transform targetArmature, CVRMergeArmature merger = null)
         {
             var smrs = targetArmature.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -960,7 +1040,6 @@ namespace NDMFMerge.Editor
         private void RebuildMagicaData(Transform avatarRoot, CVRMergeArmature merger)
         {
 #if CCK_ADDIN_MAGICACLOTHSUPPORT
-            // SAFETY CHECK: avatarRoot should be the NDMF clone root, validated by caller
             var renderDeformers = avatarRoot.GetComponentsInChildren<MagicaRenderDeformer>(true).ToList();
             if (ShouldLogDetailed(merger))
                 mergeLog.AppendLine($"Rebuilding MagicaRenderDeformer data: {renderDeformers.Count}");
@@ -1006,320 +1085,415 @@ namespace NDMFMerge.Editor
         // ------------------------------------------------------------
         // POST-MERGE: AAS controller generation
         // ------------------------------------------------------------
-        private void GenerateAASControllerAtEnd(Component targetCVRAvatar, Transform avatarRootClone, CVRMergeArmature merger)
+
+        private static void EnsureFolderExistsRecursive(string folderPath)
         {
-            if (targetCVRAvatar == null) return;
+            if (string.IsNullOrEmpty(folderPath)) return;
+            folderPath = folderPath.Replace('\\', '/').TrimEnd('/');
 
-            if (ShouldLogInfo(merger))
-                mergeLog.AppendLine("  [AAS End-Gen] Starting post-merge AAS controller generation...");
-            
-            // SAFETY CHECK: Only modify if component is part of the NDMF clone hierarchy
-            if (avatarRootClone != null && !targetCVRAvatar.transform.IsChildOf(avatarRootClone))
+            string[] parts = folderPath.Split('/');
+            if (parts.Length == 0) return;
+
+            string currentPath = parts[0];
+            for (int i = 1; i < parts.Length; i++)
             {
-                if (ShouldLogWarnings(merger))
-                    mergeLog.AppendLine("AAS end-gen: skipped - target CVRAvatar is not in clone hierarchy");
-                if (ShouldLogInfo(merger))
-                    mergeLog.AppendLine("  [AAS End-Gen] Skipped: target CVRAvatar is not in clone hierarchy");
-                if (ShouldLogDetailed(merger))
-                    mergeLog.AppendLine("AAS end-gen: Skipped - target CVRAvatar is not in clone hierarchy");
-                return;
-            }
+                string parentPath = currentPath;
+                currentPath = currentPath + "/" + parts[i];
 
-            var advSettings = GetAdvancedAvatarSettings(targetCVRAvatar);
-            if (advSettings == null)
-            {
-                if (ShouldLogWarnings(merger))
-                    mergeLog.AppendLine("AAS end-gen: skipped - no avatarSettings found on target");
-                if (ShouldLogInfo(merger))
-                    mergeLog.AppendLine("  [AAS End-Gen] Skipped: no avatarSettings found on target");
-                if (ShouldLogDetailed(merger))
-                    mergeLog.AppendLine("AAS end-gen: No avatarSettings found on target.");
-                return;
-            }
-
-            EnsureSettingsListExists(advSettings);
-            var settingsList = GetSettingsList(advSettings);
-            if (settingsList == null || settingsList.Count == 0)
-            {
-                if (ShouldLogWarnings(merger))
-                    mergeLog.AppendLine("AAS end-gen: skipped - settings list empty");
-                if (ShouldLogInfo(merger))
-                    mergeLog.AppendLine("  [AAS End-Gen] Skipped: settings list empty");
-                if (ShouldLogDetailed(merger))
-                    mergeLog.AppendLine("AAS end-gen: settings list empty.");
-                return;
-            }
-
-            EnsureRootFolder();
-
-            string avatarName = targetCVRAvatar.gameObject.name;
-            string safeAvatarName = SanitizeFileName(avatarName);
-            string avatarAASFolder = $"{ROOT_GEN_FOLDER}/{safeAvatarName}_AAS";
-            string controllerPath = $"{avatarAASFolder}/{safeAvatarName}_aas.controller";
-            string overridePath = $"{avatarAASFolder}/{safeAvatarName}_aas_overrides.overrideController";
-            string animFolder = $"{avatarAASFolder}/{safeAvatarName}_AAS_Anims";
-
-            if (!AssetDatabase.IsValidFolder(avatarAASFolder))
-                AssetDatabase.CreateFolder(ROOT_GEN_FOLDER, $"{safeAvatarName}_AAS");
-            if (!AssetDatabase.IsValidFolder(animFolder))
-                AssetDatabase.CreateFolder(avatarAASFolder, $"{safeAvatarName}_AAS_Anims");
-            else
-            {
-                var animGUIDs = AssetDatabase.FindAssets("", new[] { animFolder });
-                foreach (var guid in animGUIDs)
-                    AssetDatabase.DeleteAsset(AssetDatabase.GUIDToAssetPath(guid));
-            }
-
-            RuntimeAnimatorController baseRuntime = null;
-            RuntimeAnimatorController baseOverrideRuntime = null;
-
-            {
-                var fBase = advSettings.GetType().GetField("baseController");
-                if (fBase != null) baseRuntime = fBase.GetValue(advSettings) as RuntimeAnimatorController;
-
-                var fBaseOv = advSettings.GetType().GetField("baseOverrideController");
-                if (fBaseOv != null) baseOverrideRuntime = fBaseOv.GetValue(advSettings) as RuntimeAnimatorController;
-            }
-
-            AnimatorController baseController = null;
-            if (baseRuntime is AnimatorController ac)
-                baseController = ac;
-            else if (baseRuntime is AnimatorOverrideController aoc && aoc.runtimeAnimatorController is AnimatorController bac)
-                baseController = bac;
-
-            if (baseController == null)
-            {
-                if (ShouldLogWarnings(merger))
-                    mergeLog.AppendLine("AAS end-gen: skipped - avatarSettings.baseController missing or not AnimatorController");
-                if (ShouldLogInfo(merger))
-                    mergeLog.AppendLine("  [AAS End-Gen] Skipped: base controller missing or not an AnimatorController");
-                mergeLog.AppendLine("AAS end-gen: ERROR - avatarSettings.baseController missing or not AnimatorController.");
-                return;
-            }
-
-            AnimatorController newController = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
-            if (newController != null)
-            {
-                EditorUtility.CopySerialized(baseController, newController);
-                newController.name = $"{safeAvatarName}_aas";
-            }
-            else
-            {
-                newController = UnityEngine.Object.Instantiate(baseController);
-                newController.name = $"{safeAvatarName}_aas";
-                AssetDatabase.CreateAsset(newController, controllerPath);
-            }
-
-            var baseParams = new HashSet<string>();
-            foreach (var p in newController.parameters)
-            {
-                if (p == null || string.IsNullOrEmpty(p.name) || p.name.StartsWith("#")) continue;
-                baseParams.Add(p.name);
-            }
-
-            int createdEntries = 0;
-            foreach (var entry in settingsList)
-            {
-                if (entry == null) continue;
-                string machineName = GetEntryMachineName(entry);
-                if (string.IsNullOrEmpty(machineName) || baseParams.Contains(machineName)) continue;
-
-                var settingProp = entry.GetType().GetProperty("setting");
-                var settingObj = settingProp?.GetValue(entry);
-                if (settingObj == null) continue;
-
-                var setupMethod = settingObj.GetType().GetMethod(
-                    "SetupAnimator",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-                if (setupMethod == null) continue;
-
-                try
+                string fullDiskPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Application.dataPath), currentPath);
+                if (!System.IO.Directory.Exists(fullDiskPath))
                 {
-                    object[] args = { newController, machineName, animFolder, SanitizeFileName(machineName) };
-                    setupMethod.Invoke(settingObj, args);
-                    newController = args[0] as AnimatorController ?? newController;
-                    createdEntries++;
+                    System.IO.Directory.CreateDirectory(fullDiskPath);
                 }
-                catch (Exception ex)
+
+                if (!AssetDatabase.IsValidFolder(currentPath))
                 {
-                    mergeLog.AppendLine($"AAS end-gen: SetupAnimator failed '{machineName}': {ex.Message}");
+                    AssetDatabase.ImportAsset(currentPath, ImportAssetOptions.ForceSynchronousImport);
+                    if (!AssetDatabase.IsValidFolder(currentPath))
+                    {
+                        AssetDatabase.CreateFolder(parentPath, parts[i]);
+                    }
                 }
             }
 
-            EditorUtility.SetDirty(newController);
-
-            SetAdvAnimator(advSettings, newController);
-
-            AnimatorOverrideController overrideController = FixOrCreateOverrideController(
-                advSettings,
-                baseOverrideRuntime,
-                newController,
-                overridePath,
-                safeAvatarName);
-
-            AttachCreatedOverrideToAvatar(targetCVRAvatar, overrideController, avatarRootClone);
-            TrySetActualControllerOnAvatar(targetCVRAvatar, newController, avatarRootClone);
-
-            EditorUtility.SetDirty(targetCVRAvatar);
-
-            if (ShouldLogInfo(merger))
-                mergeLog.AppendLine($"  [AAS End-Gen] Complete: added {createdEntries} AAS entries");
-            if (ShouldLogDetailed(merger))
-                mergeLog.AppendLine($"AAS end-gen: added {createdEntries} AAS entries.");
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
         }
 
-        private void EnsureRootFolder()
-        {
-            if (!AssetDatabase.IsValidFolder(ROOT_GEN_FOLDER))
-            {
-                string[] split = ROOT_GEN_FOLDER.Split('/');
-                if (split.Length > 1 && !AssetDatabase.IsValidFolder(ROOT_GEN_FOLDER))
-                    AssetDatabase.CreateFolder(split[0], split[1]);
-            }
-        }
-
-        private void SetAdvAnimator(object advSettings, AnimatorController animator)
+        private static void SanitizeAndValidateAASettings(object advSettings)
         {
             if (advSettings == null) return;
-            var f = advSettings.GetType().GetField("animator");
-            if (f != null && typeof(AnimatorController).IsAssignableFrom(f.FieldType))
-                f.SetValue(advSettings, animator);
-        }
+            var list = GetSettingsList(advSettings);
+            if (list == null) return;
 
-        private AnimatorOverrideController FixOrCreateOverrideController(
-            object advSettings,
-            RuntimeAnimatorController baseOverrideRuntime,
-            AnimatorController generatedAnimator,
-            string overridePath,
-            string safeAvatarName)
-        {
-            AnimatorOverrideController overrides = AssetDatabase.LoadAssetAtPath<AnimatorOverrideController>(overridePath);
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
 
-            if (overrides != null)
+            for (int i = list.Count - 1; i >= 0; i--)
             {
-                if (baseOverrideRuntime is AnimatorOverrideController baseOv)
+                var entry = list[i];
+                if (entry == null)
                 {
-                    EditorUtility.CopySerialized(baseOv, overrides);
-                    overrides.name = $"{safeAvatarName}_aas_overrides";
+                    list.RemoveAt(i);
+                    continue;
+                }
+
+                var entryType = entry.GetType();
+                var settingProp = entryType.GetProperty("setting", flags)?.GetValue(entry)
+                                  ?? entryType.GetField("setting", flags)?.GetValue(entry);
+
+                if (settingProp == null)
+                {
+                    list.RemoveAt(i);
+                    continue;
+                }
+
+                string machineName = GetEntryMachineName(entry);
+                if (string.IsNullOrWhiteSpace(machineName))
+                {
+                    machineName = $"Setting_{i}";
+                    SetEntryMachineName(entry, machineName);
                 }
                 else
                 {
-                    var blank = new AnimatorOverrideController();
-                    EditorUtility.CopySerialized(blank, overrides);
-                    overrides.name = $"{safeAvatarName}_aas_overrides";
-                    UnityEngine.Object.DestroyImmediate(blank);
+                    string sanitized = SanitizeMachineName(machineName);
+                    if (string.IsNullOrWhiteSpace(sanitized)) sanitized = $"Setting_{i}";
+                    SetEntryMachineName(entry, sanitized);
                 }
-            }
-            else
-            {
-                if (baseOverrideRuntime is AnimatorOverrideController baseOv)
-                    overrides = UnityEngine.Object.Instantiate(baseOv);
-                else
-                    overrides = new AnimatorOverrideController();
 
-                overrides.name = $"{safeAvatarName}_aas_overrides";
-                AssetDatabase.CreateAsset(overrides, overridePath);
-            }
-
-            overrides.runtimeAnimatorController = generatedAnimator;
-            EditorUtility.SetDirty(overrides);
-
-            var fOv = advSettings.GetType().GetField("overrides");
-            if (fOv != null && typeof(AnimatorOverrideController).IsAssignableFrom(fOv.FieldType))
-                fOv.SetValue(advSettings, overrides);
-
-            return overrides;
-        }
-
-        private void AttachCreatedOverrideToAvatar(Component avatarComp, AnimatorOverrideController overrideController, Transform avatarRootClone)
-        {
-            if (avatarComp == null || overrideController == null) return;
-            
-            // SAFETY CHECK: Only modify if component is part of the NDMF clone hierarchy
-            if (avatarRootClone != null && !avatarComp.transform.IsChildOf(avatarRootClone))
-            {
-                return; // Silently skip if not in clone
-            }
-            
-            Undo.RecordObject(avatarComp, "Attach created Override to Avatar");
-
-            var f = avatarComp.GetType().GetField("overrides");
-            if (f != null && typeof(AnimatorOverrideController).IsAssignableFrom(f.FieldType))
-            {
-                f.SetValue(avatarComp, overrideController);
-                EditorUtility.SetDirty(avatarComp);
-                return;
-            }
-
-            TrySetOverrideControllerOnAvatar(avatarComp, overrideController);
-        }
-
-        private void TrySetOverrideControllerOnAvatar(Component cvrAvatar, RuntimeAnimatorController controller)
-        {
-            if (cvrAvatar == null || controller == null) return;
-            var t = cvrAvatar.GetType();
-
-            var fields = new[] { "overrides", "animationOverrides", "avatarOverrideController" };
-            foreach (var name in fields)
-            {
-                var f = t.GetField(name);
-                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
+                string name = GetEntryName(entry);
+                if (string.IsNullOrWhiteSpace(name))
                 {
-                    f.SetValue(cvrAvatar, controller);
-                    EditorUtility.SetDirty(cvrAvatar);
-                    return;
+                    SetEntryName(entry, GetEntryMachineName(entry));
                 }
+
+                SanitizeSettingSubObject(settingProp);
+            }
+        }
+
+        private static void SanitizeSettingSubObject(object settingObj)
+        {
+            if (settingObj == null) return;
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+            foreach (var f in settingObj.GetType().GetFields(flags))
+            {
+                if (f.FieldType == typeof(string))
+                {
+                    if (f.GetValue(settingObj) == null)
+                        f.SetValue(settingObj, string.Empty);
+                }
+            }
+        }
+
+        private static string SanitizeMachineName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "Setting";
+            StringBuilder sb = new StringBuilder();
+            foreach (char c in name)
+            {
+                if (char.IsLetterOrDigit(c) || c == '_' || c == '-')
+                    sb.Append(c);
+                else if (c == ' ')
+                    sb.Append('_');
+            }
+            string res = sb.ToString().Trim('_');
+            return string.IsNullOrWhiteSpace(res) ? "Setting" : res;
+        }
+
+        private void GenerateAASControllerAtEnd(Component targetCVRAvatar, Transform avatarRootClone, CVRMergeArmature merger)
+        {
+            if (targetCVRAvatar == null || avatarRootClone == null ||
+                !targetCVRAvatar.transform.IsChildOf(avatarRootClone))
+                throw new InvalidOperationException("AAS generation requires a CVRAvatar in the build clone hierarchy.");
+
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var editorType = FindTypeInLoadedAssemblies("ABI.CCK.Components.CCK_CVRAvatarEditor");
+            var createMethod = editorType?.GetMethod("CreateAASController", flags, null, Type.EmptyTypes, null);
+            if (createMethod == null || createMethod.ReturnType != typeof(void))
+                throw new InvalidOperationException("The installed CCK does not expose the expected CreateAASController() method.");
+
+            var advSettings = GetAdvancedAvatarSettings(targetCVRAvatar)
+                ?? throw new InvalidOperationException("CVRAvatar.avatarSettings is missing.");
+            var settingsType = advSettings.GetType();
+            var animatorField = settingsType.GetField("animator", flags)
+                ?? throw new MissingFieldException(settingsType.FullName, "animator");
+            var overridesField = settingsType.GetField("overrides", flags)
+                ?? throw new MissingFieldException(settingsType.FullName, "overrides");
+            var baseField = settingsType.GetField("baseController", flags)
+                ?? throw new MissingFieldException(settingsType.FullName, "baseController");
+            var originalBase = baseField.GetValue(advSettings);
+            var baseController = ReadCckControllerInput<AnimatorController>(originalBase, "baseController", true);
+
+            var baseOverrideField = settingsType.GetField("baseOverrideController", flags)
+                ?? throw new MissingFieldException(settingsType.FullName, "baseOverrideController");
+            var baseOverride = baseOverrideField.GetValue(advSettings);
+            var baseOverrideController = ReadCckControllerInput<AnimatorOverrideController>(baseOverride, "baseOverrideController", false);
+
+            var settings = GetSettingsList(advSettings)
+                ?? throw new InvalidOperationException("CVRAvatar.avatarSettings.settings is missing.");
+            for (int i = 0; i < settings.Count; i++)
+            {
+                var entry = settings[i];
+                if (entry == null || entry.GetType().GetProperty("setting", flags)?.GetValue(entry) == null)
+                    throw new InvalidOperationException($"AAS entry {i} has no setting implementation.");
+            }
+
+            // The CCK disables Create above its sync budget; invoking the private method
+            // bypasses that GUI guard, so evaluate the same public CCK calculation first.
+            var usageMethod = targetCVRAvatar.GetType().GetMethod("GetParameterSyncUsage", flags, null, Type.EmptyTypes, null);
+            var commonType = FindTypeInLoadedAssemblies("ABI.CCK.Scripts.CVRCommon");
+            var bitLimitField = commonType?.GetField("AVATAR_BIT_LIMIT", BindingFlags.Public | BindingFlags.Static);
+            if (usageMethod == null || bitLimitField == null)
+                throw new InvalidOperationException("The installed CCK does not expose the expected AAS sync budget API.");
+            var usage = usageMethod.Invoke(targetCVRAvatar, null);
+            if (!(usage is ValueTuple<int, int> syncUsage))
+                throw new InvalidOperationException("CCK GetParameterSyncUsage() returned an unsupported result.");
+            float bitLimit = Convert.ToSingle(bitLimitField.GetValue(null));
+            if (syncUsage.Item2 > bitLimit)
+                throw new InvalidOperationException($"CCK Create is disabled: AAS requires {syncUsage.Item2} synced bits (limit {bitLimit}).");
+
+            string originalName = targetCVRAvatar.gameObject.name;
+            var previousAnimator = animatorField.GetValue(advSettings);
+            var previousOverrides = overridesField.GetValue(advSettings);
+            UnityEditor.Editor cckEditor = null;
+            bool attached = false;
+            bool resumeManualBakeAssetEditing = false;
+            try
+            {
+                // NDMF 1.5 ProcessAvatarUI wraps the entire manual bake in
+                // StartAssetEditing. CCK immediately loads its copied controller
+                // and adds subassets, which requires imports to be running.
+                // NDMF 1.14.8 owns the same scope in ManualProcessAvatar instead.
+                // Release only that known scope, then restore it for NDMF's finally.
+                // Do not call StopAssetEditing unconditionally on upload/play paths.
+                if (IsInsideNdmfManualBake())
+                {
+                    AssetDatabase.StopAssetEditing();
+                    resumeManualBakeAssetEditing = true;
+                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                }
+
+                // CCK hardcodes its output path from the avatar name. A build-specific
+                // name prevents overwriting source assets and other builds' controllers.
+                string safeName = SanitizeFileName(originalName.Replace("(Clone)", "").Trim()).Replace(" ", "_");
+                if (string.IsNullOrWhiteSpace(safeName)) safeName = "Avatar";
+                targetCVRAvatar.gameObject.name = $"{safeName}_NDMF_{Guid.NewGuid():N}";
+
+                // CCK copies input files. Materialize build-only inputs without
+                // discarding changed clips or modifying the source controller graph.
+                string inputFolder = $"{ROOT_GEN_FOLDER}/{targetCVRAvatar.gameObject.name}_Inputs";
+                var inputCopies = new Dictionary<UnityEngine.Object, UnityEngine.Object>();
+                baseController = (AnimatorController)PrepareCckControllerInput(baseController, inputFolder, "Base.controller", inputCopies);
+                baseOverrideController = (AnimatorOverrideController)PrepareCckControllerInput(baseOverrideController, inputFolder, "Base.overrideController", inputCopies);
+                baseField.SetValue(advSettings, baseController);
+                baseOverrideField.SetValue(advSettings, baseOverrideController);
+
+                // Avoid CCK's interactive overwrite dialog on this build clone only.
+                // Clear both outputs so a stale reference cannot count as successful Create.
+                animatorField.SetValue(advSettings, null);
+                overridesField.SetValue(advSettings, null);
+                cckEditor = UnityEditor.Editor.CreateEditor(targetCVRAvatar, editorType);
+                if (cckEditor == null)
+                    throw new InvalidOperationException("Could not create the CCK avatar editor.");
+                cckEditor.serializedObject.Update();
+                Debug.Log($"[NDMF Merge] Calling CCK Create for '{originalName}': base='{AssetDatabase.GetAssetPath(baseController)}', entries={settings.Count}, manualBakeImportsResumed={resumeManualBakeAssetEditing}", targetCVRAvatar);
+                createMethod.Invoke(cckEditor, null);
+
+                var generatedAnimator = animatorField.GetValue(advSettings) as AnimatorController;
+                var generatedOverride = overridesField.GetValue(advSettings) as AnimatorOverrideController;
+                if (generatedAnimator == null || generatedOverride == null ||
+                    generatedOverride.runtimeAnimatorController != generatedAnimator ||
+                    string.IsNullOrEmpty(AssetDatabase.GetAssetPath(generatedAnimator)) ||
+                    string.IsNullOrEmpty(AssetDatabase.GetAssetPath(generatedOverride)))
+                    throw new InvalidOperationException("CCK Create did not produce a saved animator and matching override controller.");
+
+                // AAS_BaseControllers.DrawCreateControllerButton implements Attach as
+                // overrides = avatarSettings.overrides through the serialized property.
+                cckEditor.serializedObject.Update();
+                var attachedOverride = cckEditor.serializedObject.FindProperty("overrides")
+                    ?? throw new MissingFieldException(targetCVRAvatar.GetType().FullName, "overrides");
+                attachedOverride.objectReferenceValue = generatedOverride;
+                cckEditor.serializedObject.ApplyModifiedPropertiesWithoutUndo();
+                EditorUtility.SetDirty(targetCVRAvatar);
+                attached = true;
+
+                if (ShouldLogInfo(merger))
+                    mergeLog.AppendLine($"  [AAS End-Gen] CCK Create + Attach complete: {AssetDatabase.GetAssetPath(generatedOverride)}");
+            }
+            catch (TargetInvocationException ex)
+            {
+                throw new InvalidOperationException("CCK Create + Attach failed. See the inner exception for the CCK error.", ex.InnerException ?? ex);
+            }
+            finally
+            {
+                try
+                {
+                    targetCVRAvatar.gameObject.name = originalName;
+                    if (cckEditor != null) UnityEngine.Object.DestroyImmediate(cckEditor);
+                    baseField.SetValue(advSettings, originalBase);
+                    baseOverrideField.SetValue(advSettings, baseOverride);
+                    if (!attached)
+                    {
+                        animatorField.SetValue(advSettings, previousAnimator);
+                        overridesField.SetValue(advSettings, previousOverrides);
+                    }
+                }
+                finally
+                {
+                    if (resumeManualBakeAssetEditing)
+                        AssetDatabase.StartAssetEditing();
+                }
+            }
+        }
+
+        private static bool IsInsideNdmfManualBake()
+        {
+            var frames = new System.Diagnostics.StackTrace().GetFrames();
+            if (frames == null) return false;
+            foreach (var frame in frames)
+            {
+                var method = frame.GetMethod();
+                // ProcessAvatarUI delegates to ManualProcessAvatar in newer NDMF.
+                // Return once even if both frames exist: they own one batching scope.
+                if (method?.DeclaringType == typeof(AvatarProcessor) &&
+                    (method.Name == "ProcessAvatarUI" || method.Name == "ManualProcessAvatar"))
+                    return true;
+            }
+            return false;
+        }
+
+        private static T ReadCckControllerInput<T>(object value, string fieldName, bool required) where T : RuntimeAnimatorController
+        {
+            // Reflection returns object, which bypasses Unity's destroyed-object null operator.
+            if (value == null || (value is UnityEngine.Object unityObject && unityObject == null))
+            {
+                if (required)
+                    throw new InvalidOperationException($"CCK Create requires avatarSettings.{fieldName}; it is missing or destroyed.");
+                return null;
+            }
+            if (!(value is T controller))
+                throw new InvalidOperationException($"CCK Create requires avatarSettings.{fieldName} to be {typeof(T).Name}; got {value.GetType().FullName}.");
+            return controller;
+        }
+
+        private static RuntimeAnimatorController PrepareCckControllerInput(RuntimeAnimatorController controller,
+            string folder, string fileName, Dictionary<UnityEngine.Object, UnityEngine.Object> copies)
+        {
+            if (controller == null) return null;
+            // CopyAsset copies a whole file, so a controller subasset also needs its own file.
+            if (AssetDatabase.IsMainAsset(controller)) return controller;
+
+            var ownedCopies = new List<UnityEngine.Object>();
+            UnityEngine.Object CopyReference(UnityEngine.Object source)
+            {
+                if (source == null) return null;
+                if (copies.TryGetValue(source, out var existing)) return existing;
+                bool animatorGraph = source is RuntimeAnimatorController || source is AnimatorStateMachine ||
+                    source is AnimatorState || source is AnimatorTransitionBase || source is BlendTree ||
+                    source is StateMachineBehaviour;
+                if (EditorUtility.IsPersistent(source) && !animatorGraph) return source;
+                if (source is GameObject || source is Component)
+                    throw new InvalidOperationException($"CCK input '{controller.name}' references scene object '{source.name}', which cannot be saved as a controller dependency.");
+
+                var copy = UnityEngine.Object.Instantiate(source);
+                copy.name = source.name;
+                copy.hideFlags &= ~HideFlags.DontSave;
+                copies.Add(source, copy); // Register before traversing cycles and shared references.
+                ownedCopies.Add(copy);
+                using (var serialized = new SerializedObject(copy))
+                {
+                    var property = serialized.GetIterator();
+                    while (property.Next(true))
+                    {
+                        if (property.propertyType != SerializedPropertyType.ObjectReference || property.propertyPath == "m_Script") continue;
+                        var reference = property.objectReferenceValue;
+                        if (reference != null) property.objectReferenceValue = CopyReference(reference);
+                    }
+                    serialized.ApplyModifiedPropertiesWithoutUndo();
+                }
+                return copy;
+            }
+
+            try
+            {
+                var saved = (RuntimeAnimatorController)CopyReference(controller);
+                // A shared dependency may already have been saved by the other input.
+                if (EditorUtility.IsPersistent(saved))
+                {
+                    // CCK needs a main asset even when the shared graph root is a subasset.
+                    saved = UnityEngine.Object.Instantiate(saved);
+                    saved.name = controller.name;
+                    ownedCopies.Add(saved);
+                }
+                EnsureFolderExistsRecursive(folder);
+                string path = AssetDatabase.GenerateUniqueAssetPath($"{folder}/{fileName}");
+                AssetDatabase.CreateAsset(saved, path);
+                // CCK copies the two controller files separately and then retargets
+                // the override. Keep clip identities stable across those copies.
+                foreach (var copy in ownedCopies)
+                    if (copy is AnimationClip && !EditorUtility.IsPersistent(copy))
+                        AssetDatabase.CreateAsset(copy, AssetDatabase.GenerateUniqueAssetPath($"{folder}/Clip.anim"));
+                foreach (var copy in ownedCopies)
+                    if (copy != saved && !EditorUtility.IsPersistent(copy)) AssetDatabase.AddObjectToAsset(copy, saved);
+                EditorUtility.SetDirty(saved);
+                AssetDatabase.SaveAssets();
+                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
+                var loaded = AssetDatabase.LoadAssetAtPath<RuntimeAnimatorController>(path);
+                if (loaded == null)
+                    throw new InvalidOperationException($"CCK input '{controller.name}' could not be loaded after saving to '{path}'.");
+                Debug.Log($"[NDMF Merge] Saved temporary CCK input '{controller.name}' to '{path}'.");
+                return loaded;
+            }
+            finally
+            {
+                foreach (var copy in ownedCopies)
+                    if (copy != null && !EditorUtility.IsPersistent(copy)) UnityEngine.Object.DestroyImmediate(copy);
             }
         }
 
         private void TrySetActualControllerOnAvatar(Component cvrAvatar, RuntimeAnimatorController controller, Transform avatarRootClone = null)
         {
             if (cvrAvatar == null || controller == null) return;
-            
-            // SAFETY CHECK: Only modify if component is part of the NDMF clone hierarchy (if clone context provided)
+
             if (avatarRootClone != null && !cvrAvatar.transform.IsChildOf(avatarRootClone))
             {
-                return; // Silently skip if not in clone
+                return;
             }
-            
-            var t = cvrAvatar.GetType();
-            var candidates = new[]
-            {
-                "actualAnimatorController",
-                "actualAnimator",
-                "generatedAnimatorController",
-                "generatedAnimator",
-                "actualController",
-                "baseAnimatorController",
-                "baseAnimator"
-            };
-            foreach (var name in candidates)
-            {
-                var f = t.GetField(name);
-                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
-                {
-                    f.SetValue(cvrAvatar, controller);
-                    EditorUtility.SetDirty(cvrAvatar);
-                    return;
-                }
 
-                var p = t.GetProperty(name);
-                if (p != null && p.CanWrite && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
+            var animatorController = controller as AnimatorController
+                ?? (controller as AnimatorOverrideController)?.runtimeAnimatorController as AnimatorController;
+            if (animatorController == null) return;
+
+            var existingOverride = GetAvatarOverrideController(cvrAvatar);
+            AnimatorOverrideController targetOverride;
+            if (existingOverride != null)
+            {
+                if (EditorUtility.IsPersistent(existingOverride))
                 {
-                    p.SetValue(cvrAvatar, controller);
-                    EditorUtility.SetDirty(cvrAvatar);
-                    return;
+                    targetOverride = UnityEngine.Object.Instantiate(existingOverride);
+                    targetOverride.name = existingOverride.name + " (NDMF Modified)";
+                }
+                else
+                {
+                    targetOverride = existingOverride;
                 }
             }
+            else
+            {
+                targetOverride = new AnimatorOverrideController();
+            }
+
+            targetOverride.runtimeAnimatorController = animatorController;
+            SetAvatarOverrideController(cvrAvatar, targetOverride);
         }
 
         private string SanitizeFileName(string s)
         {
-            if (string.IsNullOrEmpty(s)) return "Unnamed";
+            if (string.IsNullOrWhiteSpace(s)) return "Unnamed";
             foreach (char c in System.IO.Path.GetInvalidFileNameChars())
                 s = s.Replace(c, '_');
-            return s;
+            s = s.Trim();
+            return string.IsNullOrWhiteSpace(s) ? "Unnamed" : s;
         }
 
         // ----------------------------
@@ -1330,6 +1504,14 @@ namespace NDMFMerge.Editor
             if (ctx == null || outfitRoot == null || outfitEntry == null) return;
 
             var objectSettings = outfitEntry.objectMergeSettings ?? new ObjectMergeSettings();
+            if (objectSettings.placementMode == ObjectPlacementMode.WeightMeshesToTargetBoneAtCurrentPosition)
+            {
+                var attachmentBone = objectSettings.targetBone != null
+                    ? ResolveTransformInCloneHierarchy(objectSettings.targetBone, ctx.AvatarRootTransform)
+                    : null;
+                WeightMeshesToTargetBone(outfitRoot, attachmentBone, ctx.AvatarRootTransform);
+                return;
+            }
             var targetParent = objectSettings.targetParent != null
                 ? ResolveTransformInCloneHierarchy(objectSettings.targetParent, ctx.AvatarRootTransform)
                 : ctx.AvatarRootTransform;
@@ -1345,9 +1527,6 @@ namespace NDMFMerge.Editor
                 childrenToMove.Add(child);
 
             var placementMode = objectSettings.placementMode;
-            var targetBone = objectSettings.targetBone != null
-                ? ResolveTransformInCloneHierarchy(objectSettings.targetBone, ctx.AvatarRootTransform)
-                : null;
             var referenceTransform = objectSettings.referenceTransform != null
                 ? ResolveTransformInCloneHierarchy(objectSettings.referenceTransform, ctx.AvatarRootTransform)
                 : null;
@@ -1360,12 +1539,6 @@ namespace NDMFMerge.Editor
                 {
                     case ObjectPlacementMode.PlaceUnderSelectedGameObject:
                         child.SetParent(targetParent, true);
-                        break;
-
-                    case ObjectPlacementMode.WeightMeshesToTargetBoneAtCurrentPosition:
-                        child.SetParent(targetParent, true);
-                        if (targetBone != null)
-                            WeightMeshesToTargetBone(child, targetBone);
                         break;
 
                     case ObjectPlacementMode.PlaceUsingReference:
@@ -1392,21 +1565,112 @@ namespace NDMFMerge.Editor
                 mergeLog.AppendLine($"  Object mode merge complete: moved {childrenToMove.Count} object(s) to {targetParent.name}");
         }
 
-        private void WeightMeshesToTargetBone(Transform root, Transform targetBone)
+        private void WeightMeshesToTargetBone(Transform root, Transform targetBone, Transform avatarRoot)
         {
-            if (root == null || targetBone == null) return;
+            if (targetBone == null || !targetBone.IsChildOf(avatarRoot) || targetBone.IsChildOf(root))
+                throw new InvalidOperationException("Weighting mode requires a Target Bone on the base avatar, outside the outfit.");
 
             var smrs = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            var boneHierarchy = new HashSet<Transform>();
+            void IncludeBone(Transform bone)
+            {
+                if (bone == null || !bone.IsChildOf(root)) return;
+                if (bone == root)
+                    throw new InvalidOperationException("Weighting mode requires the outfit bone hierarchy below its container, not on the container itself.");
+                for (var current = bone; current != root; current = current.parent)
+                    boneHierarchy.Add(current);
+            }
             foreach (var smr in smrs)
             {
-                if (smr == null) continue;
-
-                smr.rootBone = targetBone;
-                if (smr.bones == null || smr.bones.Length == 0)
-                {
-                    smr.bones = new[] { targetBone };
-                }
+                foreach (var bone in smr.bones) IncludeBone(bone);
+                IncludeBone(smr.rootBone);
             }
+            if (root.GetComponent<Renderer>() != null || boneHierarchy.Any(bone => bone.GetComponent<Renderer>() != null))
+                throw new InvalidOperationException("Weighting mode requires separate mesh objects and bone transforms below the outfit container.");
+            if (root.GetComponentsInChildren<MeshRenderer>(true).Any(r => r.GetComponent<SkinnedMeshRenderer>() != null))
+                throw new InvalidOperationException("Weighting mode cannot convert an object containing both MeshRenderer and SkinnedMeshRenderer.");
+
+            // Detach non-bone branches first. Preserve their internal mesh/empty
+            // nesting, while keeping them outside the attached bone hierarchy.
+            var objects = root.GetComponentsInChildren<Transform>(true);
+            var objectRoots = objects.Where(t => t != root && !boneHierarchy.Contains(t) &&
+                (t.parent == root || boneHierarchy.Contains(t.parent))).ToArray();
+            var boneRoots = boneHierarchy.Where(t => t.parent == root).ToArray();
+            foreach (var branch in objectRoots) branch.SetParent(avatarRoot, true);
+            foreach (var bone in boneRoots) bone.SetParent(targetBone, true);
+
+            foreach (var smr in smrs)
+            {
+                if (smr.sharedMesh == null || smr.bones.Length != 0) continue;
+                BindRigidMesh(smr, smr.sharedMesh, targetBone);
+            }
+
+            foreach (var branch in objectRoots)
+                foreach (var renderer in branch.GetComponentsInChildren<MeshRenderer>(true))
+                    ConvertRigidRenderer(renderer, targetBone);
+            mergeLog.AppendLine($"  Weighting mode: attached {boneRoots.Length} bone hierarchy root(s) to {targetBone.name}; kept {objectRoots.Length} object branch(es) under the avatar root.");
+        }
+
+        private static void BindRigidMesh(SkinnedMeshRenderer renderer, Mesh source, Transform targetBone)
+        {
+            var mesh = UnityEngine.Object.Instantiate(source);
+            mesh.name = source.name + " (NDMF Rigid Skin)";
+            var weights = new BoneWeight[mesh.vertexCount];
+            for (int i = 0; i < weights.Length; i++)
+                weights[i] = new BoneWeight { boneIndex0 = 0, weight0 = 1f };
+            mesh.boneWeights = weights;
+            mesh.bindposes = new[] { targetBone.worldToLocalMatrix * renderer.transform.localToWorldMatrix };
+            renderer.sharedMesh = mesh;
+            renderer.bones = new[] { targetBone };
+            renderer.rootBone = targetBone;
+            renderer.localBounds = mesh.bounds;
+        }
+
+        private static void ConvertRigidRenderer(MeshRenderer source, Transform targetBone)
+        {
+            var filter = source.GetComponent<MeshFilter>();
+            if (filter == null || filter.sharedMesh == null) return;
+            var mesh = filter.sharedMesh;
+            var go = source.gameObject;
+            var materials = source.sharedMaterials;
+            var enabled = source.enabled;
+            var shadows = source.shadowCastingMode;
+            var receiveShadows = source.receiveShadows;
+            var lightProbes = source.lightProbeUsage;
+            var reflectionProbes = source.reflectionProbeUsage;
+            var anchor = source.probeAnchor;
+            var sortingLayer = source.sortingLayerID;
+            var sortingOrder = source.sortingOrder;
+            var renderingLayers = source.renderingLayerMask;
+            var motionVectors = source.motionVectorGenerationMode;
+            var occlusion = source.allowOcclusionWhenDynamic;
+            var properties = new MaterialPropertyBlock();
+            source.GetPropertyBlock(properties);
+            var materialProperties = new MaterialPropertyBlock[materials.Length];
+            for (int i = 0; i < materialProperties.Length; i++)
+            {
+                materialProperties[i] = new MaterialPropertyBlock();
+                source.GetPropertyBlock(materialProperties[i], i);
+            }
+            UnityEngine.Object.DestroyImmediate(source);
+            UnityEngine.Object.DestroyImmediate(filter);
+            var renderer = go.AddComponent<SkinnedMeshRenderer>();
+            renderer.sharedMaterials = materials;
+            renderer.enabled = enabled;
+            renderer.shadowCastingMode = shadows;
+            renderer.receiveShadows = receiveShadows;
+            renderer.lightProbeUsage = lightProbes;
+            renderer.reflectionProbeUsage = reflectionProbes;
+            renderer.probeAnchor = anchor;
+            renderer.sortingLayerID = sortingLayer;
+            renderer.sortingOrder = sortingOrder;
+            renderer.renderingLayerMask = renderingLayers;
+            renderer.motionVectorGenerationMode = motionVectors;
+            renderer.allowOcclusionWhenDynamic = occlusion;
+            renderer.SetPropertyBlock(properties);
+            for (int i = 0; i < materialProperties.Length; i++)
+                if (!materialProperties[i].isEmpty) renderer.SetPropertyBlock(materialProperties[i], i);
+            BindRigidMesh(renderer, mesh, targetBone);
         }
 
         private void MergeOutfitWithoutDestroy(BuildContext ctx, CVRMergeArmature merger, OutfitToMerge outfitEntry, Transform outfitRoot, Transform targetArmature, SkinnedMeshRenderer bodyReferenceMesh, Dictionary<OutfitToMerge, Transform> clonedOutfitByEntry, Dictionary<int, Transform> mergedBoneReferences, Dictionary<AnimationClip, AnimationClip> clipReplacementMap)
@@ -1437,7 +1701,6 @@ namespace NDMFMerge.Editor
                 return;
             }
 
-            // Pre-merge validations and mesh prep
             if (merger.preMergeValidationSettings != null)
                 RunPreMergeValidations(merger, outfitEntry, targetArmature, merger.preMergeValidationSettings);
 
@@ -1464,10 +1727,15 @@ namespace NDMFMerge.Editor
             RegisterMergedBoneReferences(boneMap, mergedBoneReferences);
 
             var skinnedMeshes = outfitRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            // Capture nesting before any hierarchy changes. Moving a parent renderer
+            // also moves its children; those children must not then be lifted out.
+            // MeshRenderer parents count too, including across intermediate objects.
+            var nestedRendererTransforms = new HashSet<Transform>(
+                skinnedMeshes.Where(smr => HasMeshRendererAncestor(smr.transform, outfitRoot))
+                    .Select(smr => smr.transform));
             if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  SkinnedMeshRenderers: {skinnedMeshes.Length}");
 
-            // Determine reference body mesh for this outfit when needed
             SkinnedMeshRenderer referenceForThisOutfit = null;
             if (outfitEntry.boundsFixMode == BoundsFixMode.CopyFromSelected)
             {
@@ -1483,10 +1751,8 @@ namespace NDMFMerge.Editor
                 {
                     RemapSkinnedMeshRenderer(smr, boneMap, bindposeCompensationBySourceBone, armatureSettings, merger);
 
-                    // [NEW FEATURE] Bounds Fix Mode
                     ApplyBoundsFix(smr, outfitEntry.boundsFixMode, referenceForThisOutfit, merger);
 
-                    // [NEW FEATURE] Probe Anchor Sync Mode
                     if (outfitEntry.probeAnchorSyncMode != ProbeAnchorSyncMode.None)
                     {
                         SkinnedMeshRenderer probeReference = null;
@@ -1514,7 +1780,6 @@ namespace NDMFMerge.Editor
 
             MergeHierarchy(outfitArmature, targetArmature, boneMap, merger, usedBones);
 
-            // [NEW FEATURE] Remove Unused Bones
             if (outfitEntry.removeUnusedBones)
             {
                 RemoveUnusedBones(targetArmature, usedBones, merger);
@@ -1536,7 +1801,7 @@ namespace NDMFMerge.Editor
             foreach (var smr in skinnedMeshes)
             {
                 if (smr == null) continue;
-                if (!merger.IsExcluded(smr.transform))
+                if (!merger.IsExcluded(smr.transform) && !nestedRendererTransforms.Contains(smr.transform))
                     smr.transform.SetParent(ctx.AvatarRootTransform, true);
             }
 
@@ -1562,7 +1827,6 @@ namespace NDMFMerge.Editor
             if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  Outfit merge complete");
 
-            // Post-step: Blend shape task pipeline (task-scoped direction + options)
             if (merger.blendShapeTransferSettings != null)
             {
                 merger.blendShapeTransferSettings.EnsureMigrated();
@@ -1581,7 +1845,18 @@ namespace NDMFMerge.Editor
             }
         }
 
-        // [NEW FEATURE] Bounds Fix Implementation
+        private static bool HasMeshRendererAncestor(Transform transform, Transform outfitRoot)
+        {
+            // The outfit container itself is removed by merging, so it is not a
+            // parent to preserve. Only renderer ancestors inside it count.
+            for (var parent = transform.parent; parent != null && parent != outfitRoot; parent = parent.parent)
+            {
+                if (parent.GetComponent<SkinnedMeshRenderer>() != null || parent.GetComponent<MeshRenderer>() != null)
+                    return true;
+            }
+            return false;
+        }
+
         private void ApplyBoundsFix(SkinnedMeshRenderer smr, BoundsFixMode mode, SkinnedMeshRenderer bodyReference, CVRMergeArmature merger)
         {
             switch (mode)
@@ -1607,7 +1882,6 @@ namespace NDMFMerge.Editor
             }
         }
 
-        // [NEW FEATURE] Remove Unused Bones
         private void RemoveUnusedBones(Transform armature, HashSet<Transform> usedBones, CVRMergeArmature merger)
         {
             var toRemove = new List<Transform>();
@@ -1616,8 +1890,7 @@ namespace NDMFMerge.Editor
             {
                 if (!usedBones.Contains(bone))
                 {
-                    // Check if bone has any components or non-bone children
-                    bool hasComponents = bone.GetComponents<Component>().Length > 1; // More than Transform
+                    bool hasComponents = bone.GetComponents<Component>().Length > 1;
                     bool hasChildren = false;
 
                     foreach (Transform child in bone)
@@ -1649,7 +1922,7 @@ namespace NDMFMerge.Editor
         }
 
         // ----------------------------
-        // Animator merge [IMPROVED with NEW FEATURES]
+        // Animator merge
         // ----------------------------
         private void MergeAnimators(BuildContext ctx, CVRMergeArmature merger)
         {
@@ -1660,7 +1933,6 @@ namespace NDMFMerge.Editor
             if (ShouldLogInfo(merger))
                 mergeLog.AppendLine("  [Animator Merge] Starting animator merge...");
             
-            // SAFETY CHECK: Only modify if target component is part of the NDMF clone hierarchy
             if (ctx.AvatarRootTransform != null && !targetCVRAvatar.transform.IsChildOf(ctx.AvatarRootTransform))
             {
                 if (ShouldLogDetailed(merger))
@@ -1702,7 +1974,6 @@ namespace NDMFMerge.Editor
             int layersAdded = 0;
             int combinedLayerGroups = 0;
 
-            // Pass 1: Collect and Add Parameters FIRST
             foreach (var outfitEntry in merger.outfitsToMerge)
             {
                 if (outfitEntry.outfit == null) continue;
@@ -1721,10 +1992,8 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // [NEW FEATURE] Track layer names for combining
             var layersByOriginalName = new Dictionary<string, List<AnimatorControllerLayer>>();
 
-            // Pass 2: Copy Layers
             foreach (var outfitEntry in merger.outfitsToMerge)
             {
                 if (outfitEntry.outfit == null) continue;
@@ -1752,14 +2021,12 @@ namespace NDMFMerge.Editor
                         ApplyWriteDefaultsRecursive(clonedSM, forceWD.Value);
                     }
 
-                    // [NEW FEATURE] Animator Path Rewriting
                     if (merger.animatorRewritePaths)
                     {
                         RewriteAnimationPaths(clonedSM, outfitEntry.outfit.name, ctx.AvatarRootTransform, clipReplacementMap, merger);
                     }
 
                     string layerName;
-                    // [NEW FEATURE] Combine Layers By Name
                     if (merger.animatorCombineLayersByName)
                     {
                         layerName = layer.name;
@@ -1798,7 +2065,6 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // [NEW FEATURE] Apply combined layers if enabled
             if (merger.animatorCombineLayersByName)
             {
                 foreach (var kvp in layersByOriginalName)
@@ -1811,11 +2077,9 @@ namespace NDMFMerge.Editor
                     }
                     else
                     {
-                        // Merge multiple layers with same name
                         var mergedLayer = layers[0];
                         combinedLayerGroups++;
 
-                        // [NEW FEATURE] Merge Avatar Masks
                         if (merger.animatorMergeAvatarMasks && layers.Any(l => l.avatarMask != null))
                         {
                             mergedLayer.avatarMask = MergeAvatarMasks(layers.Select(l => l.avatarMask).Where(m => m != null).ToArray());
@@ -1836,7 +2100,6 @@ namespace NDMFMerge.Editor
                 mergeLog.AppendLine($"  [Animator Merge] Complete: added {parametersAdded} parameter(s), added {layersAdded} layer(s), combined {combinedLayerGroups} layer group(s)");
         }
 
-        // [NEW FEATURE] Rewrite Animation Paths
         private void RewriteAnimationPaths(AnimatorStateMachine sm, string outfitName, Transform avatarRoot, Dictionary<AnimationClip, AnimationClip> clipReplacementMap, CVRMergeArmature merger)
         {
             if (sm == null || avatarRoot == null) return;
@@ -1883,20 +2146,16 @@ namespace NDMFMerge.Editor
             bool anyPathsRewritten = false;
             int rewrittenBindings = 0;
             int skippedBindings = 0;
-            
-            // Process float curve bindings
+
             foreach (var binding in curveBindings)
             {
                 var curve = AnimationUtility.GetEditorCurve(rewrittenClip, binding);
                 if (curve == null) continue;
-                
-                // Check if path needs rewriting (starts with outfit name)
+
                 if (binding.path.StartsWith(outfitName + "/") || binding.path == outfitName)
                 {
-                    // Strip outfit name from path
                     string newPath = binding.path == outfitName ? "" : binding.path.Substring(outfitName.Length + 1);
-                    
-                    // Verify the new path exists in the merged hierarchy
+
                     Transform target = string.IsNullOrEmpty(newPath) ? avatarRoot : avatarRoot.Find(newPath);
                     
                     if (target != null)
@@ -1908,10 +2167,8 @@ namespace NDMFMerge.Editor
                             objectBindings = AnimationUtility.GetObjectReferenceCurveBindings(rewrittenClip);
                         }
 
-                        // Remove old binding
                         AnimationUtility.SetEditorCurve(rewrittenClip, binding, null);
-                        
-                        // Create new binding with rewritten path
+
                         var newBinding = binding;
                         newBinding.path = newPath;
                         AnimationUtility.SetEditorCurve(rewrittenClip, newBinding, curve);
@@ -1925,20 +2182,16 @@ namespace NDMFMerge.Editor
                     }
                 }
             }
-            
-            // Process object reference bindings
+
             foreach (var binding in objectBindings)
             {
                 var keyframes = AnimationUtility.GetObjectReferenceCurve(rewrittenClip, binding);
                 if (keyframes == null || keyframes.Length == 0) continue;
-                
-                // Check if path needs rewriting (starts with outfit name)
+
                 if (binding.path.StartsWith(outfitName + "/") || binding.path == outfitName)
                 {
-                    // Strip outfit name from path
                     string newPath = binding.path == outfitName ? "" : binding.path.Substring(outfitName.Length + 1);
-                    
-                    // Verify the new path exists in the merged hierarchy
+
                     Transform target = string.IsNullOrEmpty(newPath) ? avatarRoot : avatarRoot.Find(newPath);
                     
                     if (target != null)
@@ -1950,10 +2203,8 @@ namespace NDMFMerge.Editor
                             objectBindings = AnimationUtility.GetObjectReferenceCurveBindings(rewrittenClip);
                         }
 
-                        // Remove old binding
                         AnimationUtility.SetObjectReferenceCurve(rewrittenClip, binding, null);
-                        
-                        // Create new binding with rewritten path
+
                         var newBinding = binding;
                         newBinding.path = newPath;
                         AnimationUtility.SetObjectReferenceCurve(rewrittenClip, newBinding, keyframes);
@@ -2054,14 +2305,12 @@ namespace NDMFMerge.Editor
             return cloned;
         }
 
-        // [NEW FEATURE] Merge Avatar Masks
         private AvatarMask MergeAvatarMasks(AvatarMask[] masks)
         {
             if (masks == null || masks.Length == 0) return null;
 
             var merged = new AvatarMask();
 
-            // Union all transform paths
             var allPaths = new HashSet<string>();
             foreach (var mask in masks)
             {
@@ -2112,32 +2361,21 @@ namespace NDMFMerge.Editor
 
         private AnimatorController GetPreferredController(Component cvrAvatar)
         {
-            var t = cvrAvatar.GetType();
-            var candidates = new[]
-            {
-                "actualAnimatorController",
-                "actualAnimator",
-                "generatedAnimatorController",
-                "generatedAnimator",
-                "actualController",
-                "baseAnimatorController",
-                "baseAnimator"
-            };
+            if (cvrAvatar == null) return null;
 
-            foreach (var name in candidates)
+            var avOverride = GetAvatarOverrideController(cvrAvatar);
+            if (avOverride != null && avOverride.runtimeAnimatorController is AnimatorController wrapped)
+                return wrapped;
+
+            var advSettings = GetAdvancedAvatarSettings(cvrAvatar);
+            if (advSettings != null)
             {
-                var f = t.GetField(name);
-                if (f != null && typeof(RuntimeAnimatorController).IsAssignableFrom(f.FieldType))
-                {
-                    var val = f.GetValue(cvrAvatar) as RuntimeAnimatorController;
-                    if (val != null) return val as AnimatorController;
-                }
-                var p = t.GetProperty(name);
-                if (p != null && typeof(RuntimeAnimatorController).IsAssignableFrom(p.PropertyType))
-                {
-                    var val = p.GetValue(cvrAvatar) as RuntimeAnimatorController;
-                    if (val != null) return val as AnimatorController;
-                }
+                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var fBase = advSettings.GetType().GetField("baseController", flags);
+                var baseRuntime = fBase?.GetValue(advSettings) as RuntimeAnimatorController;
+                if (baseRuntime is AnimatorController bac) return bac;
+                if (baseRuntime is AnimatorOverrideController baoc && baoc != null && baoc.runtimeAnimatorController is AnimatorController baocBase)
+                    return baocBase;
             }
 
             var anim = cvrAvatar.GetComponent<Animator>();
@@ -2151,10 +2389,9 @@ namespace NDMFMerge.Editor
         {
             if (targetCVRAvatar == null || avatarRootClone == null) return;
             
-            // SAFETY CHECK: Only modify if target component is part of the NDMF clone hierarchy
             if (!targetCVRAvatar.transform.IsChildOf(avatarRootClone))
             {
-                return; // Silently skip if not in clone
+                return;
             }
             
             var paramStreamType = FindTypeInLoadedAssemblies("ABI.CCK.Components.CVRParameterStream");
@@ -2172,7 +2409,8 @@ namespace NDMFMerge.Editor
             int entriesAdded = 0;
             foreach (var sourceStream in sourceStreams)
             {
-                var entriesField = sourceStream.GetType().GetField("entries");
+                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var entriesField = sourceStream.GetType().GetField("entries", flags);
                 if (entriesField == null) continue;
 
                 var sourceEntries = entriesField.GetValue(sourceStream) as IList;
@@ -2220,9 +2458,10 @@ namespace NDMFMerge.Editor
 
             foreach (var d in allDrivers)
             {
-                var animatorsField = driverType.GetField("animators");
-                var paramsField = driverType.GetField("animatorParameters");
-                var typesField = driverType.GetField("animatorParameterType");
+                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var animatorsField = driverType.GetField("animators", flags);
+                var paramsField = driverType.GetField("animatorParameters", flags);
+                var typesField = driverType.GetField("animatorParameterType", flags);
                 if (animatorsField == null || paramsField == null || typesField == null) continue;
 
                 var animators = animatorsField.GetValue(d) as IList;
@@ -2262,9 +2501,10 @@ namespace NDMFMerge.Editor
                 var driverComp = containerGO.AddComponent(driverType);
                 driverComp.name = $"CVRAnimatorDriver_Merged_{driverIndex++}";
 
-                var animatorsField = driverType.GetField("animators");
-                var paramsField = driverType.GetField("animatorParameters");
-                var typesField = driverType.GetField("animatorParameterType");
+                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var animatorsField = driverType.GetField("animators", flags);
+                var paramsField = driverType.GetField("animatorParameters", flags);
+                var typesField = driverType.GetField("animatorParameterType", flags);
 
                 var animList = (IList)Activator.CreateInstance(animatorsField.FieldType);
                 var paramList = (IList)Activator.CreateInstance(paramsField.FieldType);
@@ -2290,16 +2530,19 @@ namespace NDMFMerge.Editor
             if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Animator Driver Split] Complete: created {driverIndex} merged driver component(s) from {entries.Count} entries");
         }
+
         private float GetDriverValue(Component driver, int slot1to16)
         {
-            var f = driver.GetType().GetField($"animatorParameter{slot1to16:00}");
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var f = driver.GetType().GetField($"animatorParameter{slot1to16:00}", flags);
             if (f == null) return 0f;
             return (float)f.GetValue(driver);
         }
 
         private void SetDriverValue(Component driver, int slot1to16, float value)
         {
-            var f = driver.GetType().GetField($"animatorParameter{slot1to16:00}");
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var f = driver.GetType().GetField($"animatorParameter{slot1to16:00}", flags);
             if (f == null) return;
             f.SetValue(driver, value);
         }
@@ -2308,10 +2551,9 @@ namespace NDMFMerge.Editor
         {
             if (targetCVRAvatar == null || avatarRootClone == null) return;
             
-            // SAFETY CHECK: Only modify if target component is part of the NDMF clone hierarchy
             if (!targetCVRAvatar.transform.IsChildOf(avatarRootClone))
             {
-                return; // Silently skip if not in clone
+                return;
             }
             
             var animatorDriverType = FindTypeInLoadedAssemblies("ABI.CCK.Components.CVRAnimatorDriver");
@@ -2329,9 +2571,10 @@ namespace NDMFMerge.Editor
             int entriesAdded = 0;
             foreach (var sourceDriver in sourceDrivers)
             {
-                var animatorsField = sourceDriver.GetType().GetField("animators");
-                var paramsField = sourceDriver.GetType().GetField("animatorParameters");
-                var typesField = sourceDriver.GetType().GetField("animatorParameterType");
+                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var animatorsField = sourceDriver.GetType().GetField("animators", flags);
+                var paramsField = sourceDriver.GetType().GetField("animatorParameters", flags);
+                var typesField = sourceDriver.GetType().GetField("animatorParameterType", flags);
                 if (animatorsField == null || paramsField == null || typesField == null) continue;
 
                 var srcAnim = animatorsField.GetValue(sourceDriver) as IList;
@@ -2360,6 +2603,7 @@ namespace NDMFMerge.Editor
             if (ShouldLogInfo(merger))
                 mergeLog.AppendLine($"  [Animator Driver] Complete: added {entriesAdded} parameters to target driver");
         }
+
         // ----------------------------
         // Advanced Avatar Settings merge
         // ----------------------------
@@ -2369,7 +2613,6 @@ namespace NDMFMerge.Editor
             {
                 if (sourceCVRAvatar == null) return;
 
-                // SAFETY CHECK: Only modify if target component is part of the NDMF clone hierarchy
                 if (avatarRootClone != null && !targetCVRAvatar.transform.IsChildOf(avatarRootClone))
                 {
                     if (ShouldLogDetailed(merger))
@@ -2472,6 +2715,8 @@ namespace NDMFMerge.Editor
                     }
                 }
 
+                SanitizeAndValidateAASettings(targetSettings);
+
                 if (ShouldLogInfo(merger))
                     mergeLog.AppendLine($"  [Advanced Avatar Settings] Complete: merged {mergedCount} setting(s) from {outfitName} (skipped {skippedCount})");
 
@@ -2481,7 +2726,8 @@ namespace NDMFMerge.Editor
                     if (targetSettings is UnityEngine.Object settingsObj)
                         EditorUtility.SetDirty(settingsObj);
 
-                    var usesAdvField = targetCVRAvatar.GetType().GetField("avatarUsesAdvancedSettings");
+                    var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                    var usesAdvField = targetCVRAvatar.GetType().GetField("avatarUsesAdvancedSettings", flags);
                     if (usesAdvField != null && usesAdvField.FieldType == typeof(bool))
                         usesAdvField.SetValue(targetCVRAvatar, true);
                 }
@@ -2498,7 +2744,8 @@ namespace NDMFMerge.Editor
         private void EnsureSettingsListExists(object advancedSettings)
         {
             if (advancedSettings == null) return;
-            var field = advancedSettings.GetType().GetField("settings");
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = advancedSettings.GetType().GetField("settings", flags);
             if (field == null) return;
 
             if (field.GetValue(advancedSettings) == null)
@@ -2605,12 +2852,10 @@ namespace NDMFMerge.Editor
             var targetType = sourceTarget.GetType();
             var newTarget = Activator.CreateInstance(targetType);
 
-            var fields = targetType.GetFields(
-                BindingFlags.Public |
-                BindingFlags.NonPublic |
-                BindingFlags.Instance);
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var fields = targetType.GetFields(flags);
 
-            var treePathField = targetType.GetField("treePath");
+            var treePathField = targetType.GetField("treePath", flags);
             string treePath = treePathField?.GetValue(sourceTarget) as string;
 
             string normalizedPath = treePath;
@@ -2623,7 +2868,7 @@ namespace NDMFMerge.Editor
 
             GameObject resolvedGO = null;
 
-            var goField = targetType.GetField("gameObject");
+            var goField = targetType.GetField("gameObject", flags);
             var sourceGO = goField?.GetValue(sourceTarget) as GameObject;
 
             if (sourceGO != null && sourceGO.transform != null && sourceGO.transform.IsChildOf(avatarRoot))
@@ -2691,10 +2936,11 @@ namespace NDMFMerge.Editor
             return current.gameObject;
         }
 
-        private object GetAdvancedAvatarSettings(Component cvrAvatar)
+        private static object GetAdvancedAvatarSettings(Component cvrAvatar)
         {
             if (cvrAvatar == null) return null;
-            var field = cvrAvatar.GetType().GetField("avatarSettings");
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = cvrAvatar.GetType().GetField("avatarSettings", flags);
             return field?.GetValue(cvrAvatar);
         }
 
@@ -2704,45 +2950,56 @@ namespace NDMFMerge.Editor
             if (settingsType == null) return null;
 
             var newSettings = Activator.CreateInstance(settingsType);
-            var field = cvrAvatar.GetType().GetField("avatarSettings");
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = cvrAvatar.GetType().GetField("avatarSettings", flags);
             field?.SetValue(cvrAvatar, newSettings);
             return newSettings;
         }
 
-        private IList GetSettingsList(object advancedSettings)
+        private static IList GetSettingsList(object advancedSettings)
         {
             if (advancedSettings == null) return null;
-            var field = advancedSettings.GetType().GetField("settings");
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = advancedSettings.GetType().GetField("settings", flags);
             return field?.GetValue(advancedSettings) as IList;
         }
 
-        private string GetEntryMachineName(object entry)
+        private static string GetEntryMachineName(object entry)
         {
-            var field = entry.GetType().GetField("machineName");
+            if (entry == null) return null;
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = entry.GetType().GetField("machineName", flags);
             return field?.GetValue(entry) as string;
         }
 
-        private void SetEntryMachineName(object entry, string value)
+        private static void SetEntryMachineName(object entry, string value)
         {
-            var field = entry.GetType().GetField("machineName");
+            if (entry == null) return;
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = entry.GetType().GetField("machineName", flags);
             field?.SetValue(entry, value);
         }
 
-        private string GetEntryName(object entry)
+        private static string GetEntryName(object entry)
         {
-            var field = entry.GetType().GetField("name");
+            if (entry == null) return null;
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = entry.GetType().GetField("name", flags);
             return field?.GetValue(entry) as string;
         }
 
-        private void SetEntryName(object entry, string value)
+        private static void SetEntryName(object entry, string value)
         {
-            var field = entry.GetType().GetField("name");
+            if (entry == null) return;
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = entry.GetType().GetField("name", flags);
             field?.SetValue(entry, value);
         }
 
         private void SetSettingsInitialized(object advancedSettings, bool value)
         {
-            var field = advancedSettings.GetType().GetField("initialized");
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var field = advancedSettings.GetType().GetField("initialized", flags);
             field?.SetValue(advancedSettings, value);
         }
 
@@ -2944,9 +3201,6 @@ namespace NDMFMerge.Editor
                 mergeLog.AppendLine($"  Prefixed {count} meshes with '{prefix}'");
         }
 
-        // ============================================================
-        // [NEW FEATURES] CONFLICT RESOLUTION with Fuzzy Matching & Mappings
-        // ============================================================
         private Dictionary<Transform, Transform> BuildBoneMappingWithConflicts(
             CVRMergeArmature merger,
             OutfitToMerge outfitEntry,
@@ -2970,7 +3224,6 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // [NEW FEATURE] Build combined bone name mappings (global + semantic + per-outfit, later entries override earlier)
             var boneNameMappings = new Dictionary<string, string>();
             if (merger.enableFuzzyBoneMatching && merger.globalBoneNameMappings != null)
             {
@@ -2980,7 +3233,6 @@ namespace NDMFMerge.Editor
                         boneNameMappings[map.from] = map.to;
                 }
             }
-            // Add semantic synonyms when enabled
             if (merger.semanticBoneMatchingSettings != null && merger.semanticBoneMatchingSettings.enable && merger.semanticBoneMatchingSettings.synonyms != null)
             {
                 foreach (var syn in merger.semanticBoneMatchingSettings.synonyms)
@@ -2989,7 +3241,6 @@ namespace NDMFMerge.Editor
                         boneNameMappings[syn.from] = syn.to;
                 }
             }
-            // [NEW FEATURE] Per-outfit mappings override global
             if (outfitEntry.boneNameMappings != null)
             {
                 foreach (var map in outfitEntry.boneNameMappings)
@@ -3011,7 +3262,6 @@ namespace NDMFMerge.Editor
 
                 bool mapped = false;
 
-                // 1. Check for Explicit Conflicts
                 if (conflictLookup.TryGetValue(sourceBone, out var conflict))
                 {
                     switch (conflict.resolution)
@@ -3053,7 +3303,6 @@ namespace NDMFMerge.Editor
                     }
                 }
 
-                // 2. Standard Name Matching with NEW FEATURES
                 if (!mapped)
                 {
                     string boneName = sourceBone.name;
@@ -3064,13 +3313,11 @@ namespace NDMFMerge.Editor
                         return;
                     }
 
-                    // Apply stripping rules
                     if (!string.IsNullOrEmpty(prefix) && boneName.StartsWith(prefix))
                         boneName = boneName.Substring(prefix.Length);
                     if (!string.IsNullOrEmpty(suffix) && boneName.EndsWith(suffix))
                         boneName = boneName.Substring(0, boneName.Length - suffix.Length);
 
-                    // [NEW FEATURE] Apply bone name mappings (includes global + semantic + per-outfit)
                     if (boneNameMappings.ContainsKey(boneName))
                     {
                         boneName = boneNameMappings[boneName];
@@ -3078,10 +3325,8 @@ namespace NDMFMerge.Editor
                             mergeLog.AppendLine($"    Applied bone name mapping: {sourceBone.name} -> {boneName}");
                     }
 
-                    // Try exact match
                     Transform targetBone = FindBoneByName(target, boneName);
 
-                    // [NEW FEATURE] Fuzzy matching with Levenshtein
                     if (targetBone == null && merger.enableFuzzyBoneMatching && merger.enableLevenshteinBoneMatching)
                     {
                         targetBone = FindBoneByLevenshtein(target, boneName, merger.maxLevenshteinDistance);
@@ -3092,11 +3337,9 @@ namespace NDMFMerge.Editor
                         }
                     }
 
-                    // [NEW FEATURE] Semantic pattern fallback (after mappings/fuzzy)
                     var sem = merger.semanticBoneMatchingSettings;
                     if (targetBone == null && sem != null && sem.enable)
                     {
-                        // If source bone matches any user-specified pattern, find a target bone by the same patterns
                         if (sem.patterns != null && sem.patterns.Count > 0 && MatchesAnyPattern(boneName, sem.patterns, sem.caseInsensitive))
                         {
                             targetBone = FindBoneByPatterns(target, sem.patterns, sem.caseInsensitive);
@@ -3105,7 +3348,6 @@ namespace NDMFMerge.Editor
                                     mergeLog.AppendLine($"    Pattern match: {sourceBone.name} -> {targetBone.name}");
                         }
 
-                        // Left/Right variations support
                         if (targetBone == null && sem.enableLRVariations)
                         {
                             bool isLeft = sem.leftPatterns != null && sem.leftPatterns.Count > 0 && MatchesAnyPattern(boneName, sem.leftPatterns, sem.caseInsensitive);
@@ -3113,7 +3355,6 @@ namespace NDMFMerge.Editor
 
                             if (isLeft)
                             {
-                                // Prefer target bones that also match left tokens
                                 targetBone = FindBoneByPatterns(target, sem.leftPatterns, sem.caseInsensitive) ?? targetBone;
                             }
                             else if (isRight)
@@ -3136,21 +3377,18 @@ namespace NDMFMerge.Editor
             return mapping;
         }
 
-        // Converts source-bone weights to target-bone space by baking the source->target delta into bindposes.
         private static Matrix4x4 ComputeBindposeCompensationDelta(Transform sourceBone, Transform targetBone)
         {
             if (sourceBone == null || targetBone == null) return Matrix4x4.identity;
             return targetBone.worldToLocalMatrix * sourceBone.localToWorldMatrix;
         }
 
-        // Simple wildcard matcher (* and ?) with optional case-insensitive
         private bool MatchesPatternName(string name, string pattern, bool caseInsensitive)
         {
             if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(pattern)) return false;
             var n = caseInsensitive ? name.ToLowerInvariant() : name;
             var p = caseInsensitive ? pattern.ToLowerInvariant() : pattern;
 
-            // Convert wildcard to regex
             string regex = "^" + System.Text.RegularExpressions.Regex.Escape(p)
                 .Replace("\\*", ".*")
                 .Replace("\\?", ".") + "$";
@@ -3193,7 +3431,6 @@ namespace NDMFMerge.Editor
             return found;
         }
 
-        // [NEW FEATURE] Levenshtein Distance Algorithm
         private int LevenshteinDistance(string s1, string s2)
         {
             if (string.IsNullOrEmpty(s1)) return string.IsNullOrEmpty(s2) ? 0 : s2.Length;
@@ -3218,7 +3455,6 @@ namespace NDMFMerge.Editor
             return d[n, m];
         }
 
-        // [NEW FEATURE] Find bone by Levenshtein distance
         private Transform FindBoneByLevenshtein(Transform root, string targetName, int maxDistance)
         {
             Transform bestMatch = null;
@@ -3341,7 +3577,6 @@ namespace NDMFMerge.Editor
                         {
                             if (compensateAutoMappedBones)
                             {
-                                // Fallback for name/fuzzy mappings that are not represented in explicit conflict entries.
                                 delta = ComputeBindposeCompensationDelta(sourceBone, mappedBone);
                                 autoCompensatedBindposeCount++;
                             }
@@ -3351,7 +3586,6 @@ namespace NDMFMerge.Editor
                             }
                         }
 
-                        // New skinning uses targetBone * bindposeNew. Bake source->target delta so vertices stay in place.
                         bindposes[i] = delta * bindposes[i];
                         bindposesChanged = true;
                         compensatedBindposeCount++;
@@ -3380,7 +3614,6 @@ namespace NDMFMerge.Editor
             int dynamicBonesFound = 0;
             int magicaClothsFound = 0;
 
-            // [FIX] Respect flags
             if (merger.mergeDynamicBones)
             {
                 var dynamicBoneType = FindTypeInLoadedAssemblies("DynamicBone");
@@ -3400,7 +3633,6 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // [FIX] Respect flags
             if (merger.mergeMagicaCloth)
             {
                 var magicaClothType = FindTypeInLoadedAssemblies("MagicaCloth.MagicaCloth");
@@ -3423,11 +3655,9 @@ namespace NDMFMerge.Editor
 
         private void RemapComponentTransformField(Component component, string fieldName, Dictionary<Transform, Transform> boneMap, CVRMergeArmature merger)
         {
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
             var type = component.GetType();
-            var field = type.GetField(fieldName,
-                BindingFlags.Public |
-                BindingFlags.NonPublic |
-                BindingFlags.Instance);
+            var field = type.GetField(fieldName, flags);
 
             if (field != null && field.FieldType == typeof(Transform))
             {
@@ -3443,11 +3673,9 @@ namespace NDMFMerge.Editor
 
         private void RemapComponentTransformList(Component component, string fieldName, Dictionary<Transform, Transform> boneMap, CVRMergeArmature merger)
         {
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
             var type = component.GetType();
-            var field = type.GetField(fieldName,
-                BindingFlags.Public |
-                BindingFlags.NonPublic |
-                BindingFlags.Instance);
+            var field = type.GetField(fieldName, flags);
 
             if (field != null && typeof(IList).IsAssignableFrom(field.FieldType))
             {
@@ -3501,7 +3729,6 @@ namespace NDMFMerge.Editor
                 var mesh = EnsureSceneMeshInstance(smr, "NDMF Generated UV");
                 bool meshModified = false;
                 
-                // Generate missing UVs on UV0 if needed
                 if (settings.fillMissingUVs)
                 {
                     var uv0 = new List<Vector2>();
@@ -3517,7 +3744,6 @@ namespace NDMFMerge.Editor
                     }
                 }
                 
-                // Fix overlapping UVs (simple unwrap heuristic)
                 if (settings.autoFixOverlapping)
                 {
                     var uv0 = new List<Vector2>();
@@ -3533,7 +3759,6 @@ namespace NDMFMerge.Editor
                     }
                 }
                 
-                // Fix inverted UVs (detect clockwise winding)
                 if (settings.autoFixInverted)
                 {
                     var uv0 = new List<Vector2>();
@@ -3567,7 +3792,6 @@ namespace NDMFMerge.Editor
         {
             if (uvs.Count < 3 || triangles.Length < 3) return false;
             
-            // Sample first 10 triangles for overlaps
             int checkCount = Mathf.Min(10, triangles.Length / 3);
             for (int i = 0; i < checkCount; i++)
             {
@@ -3576,7 +3800,6 @@ namespace NDMFMerge.Editor
                 var uv1 = uvs[triangles[idx + 1]];
                 var uv2 = uvs[triangles[idx + 2]];
                 
-                // Check if triangle area in UV space is near-zero (overlapping)
                 float area = Mathf.Abs((uv1.x - uv0.x) * (uv2.y - uv0.y) - (uv2.x - uv0.x) * (uv1.y - uv0.y));
                 if (area < 0.0001f) return true;
             }
@@ -3587,13 +3810,12 @@ namespace NDMFMerge.Editor
         {
             if (uvs.Count < 3 || triangles.Length < 3) return false;
             
-            // Check winding order of first triangle
             var uv0 = uvs[triangles[0]];
             var uv1 = uvs[triangles[1]];
             var uv2 = uvs[triangles[2]];
             
             float cross = (uv1.x - uv0.x) * (uv2.y - uv0.y) - (uv2.x - uv0.x) * (uv1.y - uv0.y);
-            return cross < 0; // Clockwise = inverted
+            return cross < 0;
         }
 
         private void ConsolidateMaterials(Transform outfitRoot, MaterialConsolidationSettings settings, CVRMergeArmature merger)
@@ -3607,7 +3829,6 @@ namespace NDMFMerge.Editor
                 mergeLog.AppendLine("  [Material Consolidation] Starting material optimization...");
             var skinnedMeshes = outfitRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             
-            // Build material database
             var materialMap = new Dictionary<Material, Material>();
             var materialsByShader = new Dictionary<Shader, List<Material>>();
             int meshesUpdated = 0;
@@ -3626,7 +3847,6 @@ namespace NDMFMerge.Editor
                 }
             }
             
-            // Find duplicate materials
             int consolidatedCount = 0;
             foreach (var shaderGroup in materialsByShader.Values)
             {
@@ -3651,7 +3871,6 @@ namespace NDMFMerge.Editor
                 }
             }
             
-            // Apply material remapping
             foreach (var smr in skinnedMeshes)
             {
                 if (smr.sharedMaterials == null) continue;
@@ -3686,7 +3905,6 @@ namespace NDMFMerge.Editor
         {
             if (a.shader != b.shader) return false;
             
-            // Match by name similarity
             if (settings.matchByName)
             {
                 float similarity = CalculateNameSimilarity(a.name, b.name);
@@ -3694,7 +3912,6 @@ namespace NDMFMerge.Editor
                     return true;
             }
             
-            // Match by main texture
             if (settings.consolidateByShaderAndTexture)
             {
                 var texA = a.GetTexture("_MainTex");
@@ -3724,7 +3941,6 @@ namespace NDMFMerge.Editor
         {
             if (settings == null || task == null || avatarRoot == null) return;
             
-            // Weight Transfer (Copy current blend shape values)
             if (!task.enableWeightTransfer) return;
 
             bool verbose = ShouldLogDetailed(merger);
@@ -3760,13 +3976,11 @@ namespace NDMFMerge.Editor
 
                 if (outfitRoot == null || targetArmature == null) return;
                 
-                // Determine transfer direction
                 bool outfitToBase = task.direction == BlendShapeTransferDirection.OutfitToBase || 
                                     task.direction == BlendShapeTransferDirection.Bidirectional;
                 bool baseToOutfit = task.direction == BlendShapeTransferDirection.BaseToOutfit || 
                                     task.direction == BlendShapeTransferDirection.Bidirectional;
 
-                // Outfit -> Base transfer
                 if (outfitToBase)
                 {
                     var targetRenderers = targetArmature.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -3785,7 +3999,6 @@ namespace NDMFMerge.Editor
                     }
                 }
 
-                // Base -> Outfit transfer
                 if (baseToOutfit)
                 {
                     var outfitRenderers = outfitRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -3810,12 +4023,10 @@ namespace NDMFMerge.Editor
                     mergeLog.AppendLine($"  Blend shape weight transfer ({task.direction}): applied {appliedWeights} weight(s)");
         }
 
-        // Smart blend shape weight transfer with topology awareness
         private int TransferBlendShapeWeightsBetweenMeshes(SkinnedMeshRenderer srcSMR, Mesh srcMesh, SkinnedMeshRenderer dstSMR, Mesh dstMesh, BlendShapeTransferTask task)
         {
             int appliedCount = 0;
 
-            // For each destination blend shape, try to pull weight from source by name
             for (int di = 0; di < dstMesh.blendShapeCount; di++)
             {
                 string dstName = dstMesh.GetBlendShapeName(di);
@@ -3826,23 +4037,18 @@ namespace NDMFMerge.Editor
 
                 float weight = srcSMR.GetBlendShapeWeight(si);
                 
-                // Apply smart weight transfer if enabled
                 if (task.useSmartWeightTransfer)
                 {
-                    // Check if meshes have similar topology
                     float topologySimilarity = CalculateTopologySimilarity(srcMesh, dstMesh);
                     
-                    // If topology is very different, scale the weight to be more conservative
                     if (topologySimilarity < 0.8f)
                     {
                         weight *= topologySimilarity;
                     }
                     
-                    // Check vertex count similarity for additional safety
                     float vertexRatio = (float)dstMesh.vertexCount / Mathf.Max(1, srcMesh.vertexCount);
                     if (vertexRatio < 0.5f || vertexRatio > 2.0f)
                     {
-                        // Very different vertex counts, be more conservative
                         weight *= 0.7f;
                     }
                 }
@@ -3857,7 +4063,6 @@ namespace NDMFMerge.Editor
             return appliedCount;
         }
 
-        // Calculate topology similarity between two meshes
         private float CalculateTopologySimilarity(Mesh mesh1, Mesh mesh2)
         {
             if (mesh1 == null || mesh2 == null) return 0f;
@@ -3868,7 +4073,6 @@ namespace NDMFMerge.Editor
             float triangleRatio = Mathf.Min((float)mesh1.triangles.Length / Mathf.Max(1, mesh2.triangles.Length),
                                             (float)mesh2.triangles.Length / Mathf.Max(1, mesh1.triangles.Length));
             
-            // Calculate bounds similarity
             float boundsSimilarity = 1.0f;
             if (mesh1.bounds.size.magnitude > 0.001f && mesh2.bounds.size.magnitude > 0.001f)
             {
@@ -3877,11 +4081,9 @@ namespace NDMFMerge.Editor
                 boundsSimilarity = sizeRatio;
             }
 
-            // Weighted average: vertices are most important, then triangles, then bounds
             return (vertexRatio * 0.5f) + (triangleRatio * 0.3f) + (boundsSimilarity * 0.2f);
         }
 
-        // [NEW FEATURE] Generate blend shapes from a task (new multi-task system)
         private void GenerateBlendShapesFromTask(Transform avatarRoot, Transform targetArmature, BlendShapeTransferTask task, Dictionary<OutfitToMerge, Transform> clonedOutfitByEntry, Component targetCVRAvatar, CVRMergeArmature merger, BlendShapeTransferSettings settings, Dictionary<AnimationClip, AnimationClip> clipReplacementMap)
         {
             if (task == null || task.sourceGenerationMesh == null) return;
@@ -3904,7 +4106,6 @@ namespace NDMFMerge.Editor
                 return;
             }
 
-            // Parse blend shape names to generate
             HashSet<string> targetBlendShapeNames = new HashSet<string>();
             if (!string.IsNullOrWhiteSpace(task.blendShapeNamesToGenerate))
             {
@@ -3914,7 +4115,6 @@ namespace NDMFMerge.Editor
             }
             else
             {
-                // Generate all blend shapes from source
                 for (int i = 0; i < sourceMesh.blendShapeCount; i++)
                     targetBlendShapeNames.Add(sourceMesh.GetBlendShapeName(i));
             }
@@ -3948,20 +4148,16 @@ namespace NDMFMerge.Editor
                 return;
             }
 
-            // Build selected target names ("Base Avatar" + outfit names). Empty list => all outfits.
             var selectedNames = new HashSet<string>(task.targetOutfitNames ?? new List<string>());
             bool applyToAllTargets = task.applyToAllTargets;
 
-            // Generate on base body if selected
             if ((applyToAllTargets || selectedNames.Contains("Base Avatar")) && avatarRoot != null)
             {
-                // FIX: Use avatarRoot instead of targetArmature to only affect the NDMF clone
                 var baseRenderers = avatarRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
                 foreach (var targetSMR in baseRenderers)
                 {
                     if (targetSMR.sharedMesh == null) continue;
-                    
-                    // Skip if this renderer belongs to a cloned outfit (not base)
+
                     bool isOutfitRenderer = false;
                     if (clonedOutfitByEntry != null)
                     {
@@ -3975,7 +4171,7 @@ namespace NDMFMerge.Editor
                         }
                     }
                     
-                    if (isOutfitRenderer) continue; // Skip outfit renderers when generating on base
+                    if (isOutfitRenderer) continue;
                     
                     int generated = GenerateBlendShapesOnMesh(sourceRenderer, sourceMesh, targetSMR, targetBlendShapeNames, task.maxMappingDistance, task.useSmartFrameGeneration, task.overrideExisting, task.transferMode);
                     if (generated > 0)
@@ -3988,7 +4184,6 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // Generate on outfit meshes by name
             if (clonedOutfitByEntry != null)
             {
                 foreach (var kvp in clonedOutfitByEntry)
@@ -3997,7 +4192,6 @@ namespace NDMFMerge.Editor
                     var outfitClone = kvp.Value;
                     if (outfitEntry == null || outfitEntry.outfit == null || outfitClone == null) continue;
 
-                    // If specific names selected, skip non-selected outfits
                     if (!applyToAllTargets && selectedNames.Count > 0 && !selectedNames.Contains(outfitEntry.outfit.name)) continue;
 
                     var outfitRenderers = outfitClone.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -4023,10 +4217,8 @@ namespace NDMFMerge.Editor
                 mergeLog.AppendLine($"  Blend shape generation complete: {totalGenerated} total frame(s) created");
         }
 
-        // Generate specific blend shapes from source mesh onto a target mesh
         private int GenerateBlendShapesOnMesh(SkinnedMeshRenderer srcSMR, Mesh srcMesh, SkinnedMeshRenderer dstSMR, HashSet<string> blendShapeNames, float maxMappingDistance, bool useSmartFrameGeneration, bool overrideExisting, BlendShapeTransferMode transferMode)
         {
-            // === CRITICAL: Ensure we never modify the original asset mesh directly ===
             var dstMesh = EnsureSceneMeshInstance(dstSMR, "NDMF Generated");
             if (dstMesh == null)
             {
@@ -4034,14 +4226,12 @@ namespace NDMFMerge.Editor
                 return 0;
             }
 
-            // === Validate destination mesh ===
             if (dstMesh.vertexCount == 0)
             {
                 mergeLog.AppendLine($"ERROR: Destination mesh {dstMesh.name} has zero vertices");
                 return 0;
             }
 
-            // === Validate source mesh ===
             if (srcMesh.vertexCount == 0)
             {
                 mergeLog.AppendLine($"ERROR: Source mesh has zero vertices");
@@ -4051,7 +4241,6 @@ namespace NDMFMerge.Editor
             int addedCount = 0;
             float topologySimilarity = useSmartFrameGeneration ? CalculateTopologySimilarity(srcMesh, dstMesh) : 1f;
 
-            // Build spatial hash for faster vertex mapping (O(n) instead of O(n^2))
             var srcVerts = srcMesh.vertices;
             float cellSize = Mathf.Max(0.01f, maxMappingDistance / 2f);
             var spatialHash = BuildSpatialHash(srcVerts, cellSize);
@@ -4071,26 +4260,19 @@ namespace NDMFMerge.Editor
             {
                 try
                 {
-                    // Find blend shape in source
                     int srcIndex = FindBlendShapeIndexByName(srcMesh, shapeName);
                     if (srcIndex < 0) continue;
 
-                    // Check if already exists on destination
                     int dstIndex = FindBlendShapeIndexByName(dstMesh, shapeName);
-                    if (dstIndex >= 0 && !overrideExisting) continue; // Already present, skip if override is disabled
-                    
-                    // If override is enabled and shape exists, we'll add frames which will update/replace it
+                    if (dstIndex >= 0 && !overrideExisting) continue;
 
-                    // Get frame count
                     int frameCount = srcMesh.GetBlendShapeFrameCount(srcIndex);
                     if (frameCount <= 0) continue;
 
                     totalShapesProcessed++;
 
-                    // Transfer all frames for this blend shape
                     for (int frameIdx = 0; frameIdx < frameCount; frameIdx++)
                     {
-                        // === Progress reporting for large operations ===
                         if (frameIdx % 10 == 0 && frameIdx > 0)
                         {
                             EditorUtility.DisplayProgressBar(
@@ -4105,7 +4287,6 @@ namespace NDMFMerge.Editor
                         float frameWeight = srcMesh.GetBlendShapeFrameWeight(srcIndex, frameIdx);
                         srcMesh.GetBlendShapeFrameVertices(srcIndex, frameIdx, deltaVertices, deltaNormals, deltaTangents);
 
-                        // Build approximate deltas for destination mesh
                         var dstVerts = dstMesh.vertices;
                         Vector3[] dstVertsNormalized = null;
                         if (transferMode == BlendShapeTransferMode.TransferFramesBoundsNormalized)
@@ -4116,7 +4297,6 @@ namespace NDMFMerge.Editor
 
                         float maxDist = Mathf.Max(1e-6f, maxMappingDistance);
 
-                        // Map each destination vertex to nearest source vertex (using spatial hash for efficiency)
                         for (int dvi = 0; dvi < dstVerts.Length; dvi++)
                         {
                             Vector3 dv = dstVerts[dvi];
@@ -4182,10 +4362,8 @@ namespace NDMFMerge.Editor
                             }
                         }
 
-                        // === Validate and filter delta arrays before adding ===
                         int affectedVertices = ValidateAndFilterDeltaArrays(approxDeltaVertices, approxDeltaNormals, approxDeltaTangents, dstMesh.vertexCount);
 
-                        // === Validate array lengths match mesh vertex count ===
                         if (approxDeltaVertices.Length != dstMesh.vertexCount ||
                             approxDeltaNormals.Length != dstMesh.vertexCount ||
                             approxDeltaTangents.Length != dstMesh.vertexCount)
@@ -4195,7 +4373,6 @@ namespace NDMFMerge.Editor
                             continue;
                         }
 
-                        // Only add frame if at least one vertex has a meaningful delta
                         if (affectedVertices > 0)
                         {
                             try
@@ -4210,7 +4387,6 @@ namespace NDMFMerge.Editor
                                 mergeLog.AppendLine($"  Vertex count: dst={dstMesh.vertexCount}, delta={approxDeltaVertices.Length}");
                                 mergeLog.AppendLine($"  Frame weight: {frameWeight}, Affected verts: {affectedVertices}");
                                 Debug.LogError($"Blendshape generation crash prevented: {ex.Message}\n{ex.StackTrace}");
-                                // Continue instead of crashing entire process
                                 continue;
                             }
                         }
@@ -4234,8 +4410,6 @@ namespace NDMFMerge.Editor
             return addedCount;
         }
 
-        // === CRITICAL: Ensure the SkinnedMeshRenderer has a scene-local mesh instance before modification ===
-        // If the current sharedMesh is an asset (persistent), clone it and reassign.
         private static Mesh EnsureSceneMeshInstance(SkinnedMeshRenderer smr, string suffix)
         {
             if (smr == null) return null;
@@ -4264,7 +4438,6 @@ namespace NDMFMerge.Editor
             return mesh;
         }
 
-        // Ensure MeshFilter uses a scene-local mesh before geometry edits.
         private static Mesh EnsureSceneMeshInstance(MeshFilter meshFilter, string suffix)
         {
             if (meshFilter == null) return null;
@@ -4293,7 +4466,6 @@ namespace NDMFMerge.Editor
             return mesh;
         }
 
-        // === BUILD SPATIAL HASH for efficient vertex lookup ===
         private Dictionary<Vector3Int, List<int>> BuildSpatialHash(Vector3[] vertices, float cellSize)
         {
             var hash = new Dictionary<Vector3Int, List<int>>();
@@ -4776,7 +4948,6 @@ namespace NDMFMerge.Editor
             return best;
         }
 
-        // === FIND NEAREST VERTEX using spatial hash (O(1) average vs O(n) linear) ===
         private int FindNearestVertexOptimized(Vector3 targetPos, Vector3[] vertices, Dictionary<Vector3Int, List<int>> spatialHash, float cellSize, float maxDistance)
         {
             var cell = new Vector3Int(
@@ -4788,7 +4959,6 @@ namespace NDMFMerge.Editor
             int nearestIdx = -1;
             float nearestDist = float.MaxValue;
 
-            // Check cells in expanding radius
             for (int dx = -1; dx <= 1; dx++)
             {
                 for (int dy = -1; dy <= 1; dy++)
@@ -4815,14 +4985,12 @@ namespace NDMFMerge.Editor
             return nearestIdx;
         }
 
-        // === VALIDATE AND FILTER delta arrays to prevent NaN/Infinity crashes ===
         private int ValidateAndFilterDeltaArrays(Vector3[] deltaVertices, Vector3[] deltaNormals, Vector3[] deltaTangents, int expectedLength)
         {
             int affectedVertices = 0;
 
             for (int i = 0; i < deltaVertices.Length && i < expectedLength; i++)
             {
-                // Filter deltaVertices
                 if (float.IsNaN(deltaVertices[i].x) || float.IsInfinity(deltaVertices[i].x) ||
                     float.IsNaN(deltaVertices[i].y) || float.IsInfinity(deltaVertices[i].y) ||
                     float.IsNaN(deltaVertices[i].z) || float.IsInfinity(deltaVertices[i].z))
@@ -4830,7 +4998,6 @@ namespace NDMFMerge.Editor
                     deltaVertices[i] = Vector3.zero;
                 }
 
-                // Filter deltaNormals
                 if (float.IsNaN(deltaNormals[i].x) || float.IsInfinity(deltaNormals[i].x) ||
                     float.IsNaN(deltaNormals[i].y) || float.IsInfinity(deltaNormals[i].y) ||
                     float.IsNaN(deltaNormals[i].z) || float.IsInfinity(deltaNormals[i].z))
@@ -4838,7 +5005,6 @@ namespace NDMFMerge.Editor
                     deltaNormals[i] = Vector3.zero;
                 }
 
-                // Filter deltaTangents
                 if (float.IsNaN(deltaTangents[i].x) || float.IsInfinity(deltaTangents[i].x) ||
                     float.IsNaN(deltaTangents[i].y) || float.IsInfinity(deltaTangents[i].y) ||
                     float.IsNaN(deltaTangents[i].z) || float.IsInfinity(deltaTangents[i].z))
@@ -4846,7 +5012,6 @@ namespace NDMFMerge.Editor
                     deltaTangents[i] = Vector3.zero;
                 }
 
-                // Count affected vertices
                 if (deltaVertices[i].sqrMagnitude > 1e-6f)
                 {
                     affectedVertices++;
@@ -4862,7 +5027,6 @@ namespace NDMFMerge.Editor
             string srcTransformName = source.transform.name;
             string srcRootBoneName = source.rootBone != null ? source.rootBone.name : null;
 
-            // Prefer exact sharedMesh name match
             if (!string.IsNullOrEmpty(srcMeshName))
             {
                 foreach (var c in candidates)
@@ -4872,14 +5036,12 @@ namespace NDMFMerge.Editor
                 }
             }
 
-            // Fallback: transform name match
             foreach (var c in candidates)
             {
                 if (c != null && c.transform.name == srcTransformName)
                     return c;
             }
 
-            // Fallback: root bone name match
             if (!string.IsNullOrEmpty(srcRootBoneName))
             {
                 foreach (var c in candidates)
@@ -4982,7 +5144,6 @@ namespace NDMFMerge.Editor
                 mergeLog.AppendLine("  [Semantic Bone Matching] Applying advanced matching...");
             int matchCount = 0;
             
-            // Apply synonym mappings first
             if (settings.synonyms != null && settings.synonyms.Count > 0)
             {
                 var unmatchedBones = boneMap.Where(kvp => kvp.Value == null).Select(kvp => kvp.Key).ToList();
@@ -4991,13 +5152,11 @@ namespace NDMFMerge.Editor
                 {
                     string boneName = settings.caseInsensitive ? bone.name.ToLowerInvariant() : bone.name;
                     
-                    // Check each synonym
                     foreach (var synonym in settings.synonyms)
                     {
                         string fromName = settings.caseInsensitive ? synonym.from.ToLowerInvariant() : synonym.from;
                         if (boneName.Contains(fromName))
                         {
-                            // Find target by synonym.to
                             var allTargets = boneMap.Values.Where(v => v != null).SelectMany(v => GetAllDescendants(v));
                             var match = allTargets.FirstOrDefault(t => 
                             {
@@ -5017,7 +5176,6 @@ namespace NDMFMerge.Editor
                 }
             }
             
-            // Apply Left/Right variation matching
             if (settings.enableLRVariations)
             {
                 var unmatchedBones = boneMap.Where(kvp => kvp.Value == null).Select(kvp => kvp.Key).ToList();
@@ -5029,7 +5187,6 @@ namespace NDMFMerge.Editor
                     
                     if (isLeft || isRight)
                     {
-                        // Try to find target with same patterns
                         string baseName = bone.name;
                         foreach (var pattern in isLeft ? settings.leftPatterns : settings.rightPatterns)
                             baseName = baseName.Replace(pattern, "");
@@ -5201,7 +5358,6 @@ namespace NDMFMerge.Editor
 
         private SkinnedMeshRenderer FindClosestBodyMesh(SkinnedMeshRenderer outfitMesh, SkinnedMeshRenderer[] bodyMeshes)
         {
-            // Prioritize by name similarity
             string outfitName = outfitMesh.name.ToLowerInvariant();
             foreach (var bodyMesh in bodyMeshes)
             {
@@ -5210,10 +5366,7 @@ namespace NDMFMerge.Editor
                     return bodyMesh;
             }
             
-            // Fallback: largest mesh by vertex count
             return bodyMeshes.OrderByDescending(m => m.sharedMesh?.vertexCount ?? 0).FirstOrDefault();
         }
     }
 }
-
-
