@@ -24,10 +24,28 @@ Use it alongside [NDMF Avatar Optimization](https://github.com/MilchZocker/NDMF-
 | Unity | 2021.3 or newer, as declared in the manifest. Use a version supported by your CCK. |
 | ChilloutVR CCK | Import into the Unity project before configuring your avatar. |
 | [NDMF](https://github.com/bdunderscore/ndmf) | 1.4.1 or newer. |
-| [Chillaxins](https://docs.hai-vr.dev/docs/products/chillaxins) | 1.1.0 or newer, declared as a VPM dependency; provides CVR build integration. |
+| [Chillaxins — MilchZocker fork](https://github.com/MilchZocker/chillaxins) | Use this fork (currently 1.3.0) for CVR build integration. The manifest's VPM minimum of 1.1.0 does not select the fork. |
 | Dynamic Bone / Magica Cloth | Optional, for outfits using those components. Magica rebuild support is compiled under `CCK_ADDIN_MAGICACLOTHSUPPORT`. |
 
-Install CCK, NDMF, and Chillaxins first. Unity Package Manager does not resolve `vpmDependencies`; make sure Chillaxins is installed when using a Git URL or local package.
+Install CCK, NDMF, and the **[MilchZocker Chillaxins fork](https://github.com/MilchZocker/chillaxins)** first. Unity Package Manager does not resolve `vpmDependencies`; install this fork explicitly when using a Git URL or local package. It uses the same `dev.hai-vr.chillaxins` package ID as upstream, so replace an existing upstream installation rather than installing both copies.
+
+### Install the Chillaxins fork
+
+In Unity Package Manager, select **+ → Add package from git URL…** and use the fork's source package:
+
+```text
+https://github.com/MilchZocker/chillaxins.git?path=/Packages/dev.hai-vr.chillaxins#main
+```
+
+After the fork's UPM release workflow has been merged and has published its first `upm` branch, the release URL is:
+
+```text
+https://github.com/MilchZocker/chillaxins.git#upm
+```
+
+Alternatively, download the fork's package ZIP from [its releases](https://github.com/MilchZocker/chillaxins/releases), extract it, and use **Add package from disk…** to select the extracted `package.json`. Close and reopen Unity after installation so the bundled libraries load. Follow the fork's README for build hooks and Manual Bake options; upstream package-manager listings do not install this fork.
+
+### Install NDMF Merge
 
 **Unity Package Manager:** open **Window → Package Manager → + → Add package from git URL…** and enter:
 
