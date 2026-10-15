@@ -1,644 +1,306 @@
 # NDMF Merge for ChilloutVR
 
-**NDMF Merge** is a powerful, non-destructive tool for ChilloutVR (CVR) that merges outfits, accessories, and armatures onto your base avatar at build time.
-
-It allows you to keep your project clean by keeping outfits as separate prefabs. When you upload or enter Play Mode, the tool clones your avatar, grafts the outfits, handles bone merging, rebuilds physics, and generates the necessary controllers—all without touching your source files.
-
-> **Recommended:** Use this alongside [NDMF-Avatar-Optimizer](https://github.com/MilchZocker/NDMF-Avatar-Optimization). NDMF Merge combines the avatars, and Avatar Optimizer cleans up the resulting hierarchy.
-
-## ✨ Key Features
-
-*   **Non-Destructive Workflow:** Your source assets remain untouched. All merging happens on a temporary clone during the build process.
-*   **Universal Reference Remapper:** Uses a serialized + reflection-based sweep after merge to find clone-scoped references that still point to pre-merge objects, then remaps them to the merged result. Bone references that were merged away are redirected using the recorded source-to-target merge map.
-*   **Smart Bone Merging:**
-    *   **Force Merge (Snap):** Default conflict resolution. Outfit bones are merged into the base armature and skinned meshes are remapped with bindpose compensation.
-    *   **As Child, Keep Position and Rotation:** Keeps the outfit bone and reparents it under the chosen target while preserving world pose.
-    *   **Rename/Unique:** Keeps bones separate if they shouldn't merge.
-    *   **Merge Into Selected...:** Lets you route an outfit bone into a custom target bone.
-    *   **Semantic Bone Matching:** Use synonyms and patterns to match bones with different naming conventions (e.g., 'pelvis' → 'Hips').
-    *   **Levenshtein Fuzzy Matching:** Automatically match bones with similar names using edit distance algorithms.
-    *   **Bindpose Compensation:** Preserves skinned mesh deformation when bones are remapped, including fuzzy and name-based matches when enabled.
-*   **Armature Normalization:** Normalize outfit or base+outfit transforms before merge. Supports classic scale baking and **Apply Transform-Like** baking for static and skinned meshes.
-*   **Armature Mode and Object Mode:** Merge full outfit armatures into the avatar, or merge standalone props/accessories using target-parent, reference, value, or weight-to-bone placement.
-*   **Intelligent Animator Merging:**
-    *   Merges Animator Controllers from outfits.
-    *   **Auto-detects Write Defaults:** Scans your base avatar's controller to enforce consistent Write Defaults settings on merged layers.
-    *   **Animation Path Rewriting:** Automatically rewrites animation clip paths to match the merged hierarchy.
-    *   **Avatar Mask Merging:** Combines avatar masks from multiple layers with the same name.
-    *   **Layer Combining:** Can merge incoming layers by original layer name instead of always prefixing outfit names.
-    *   Splits **Animator Drivers** automatically if they exceed the 16-parameter limit.
-    *   **Non-Destructive Clip Editing:** If clip paths or generated blendshape animation curves need to be modified, the tool duplicates only the affected clips and rebinds clone-side references to the copied versions.
-*   **Full CVR Component Support:**
-    *   Merges **Advanced Avatar Settings (AAS)**, creating a unified menu.
-    *   Merges **Parameter Streams** and **Animator Drivers**.
-    *   Regenerates the AAS Animator Controller at the end of the build to ensure all animations allow for toggling.
-    *   **Pointer Trigger:** The toggle exists in the component, but merge implementation is currently still a placeholder.
-*   **Physics Support:**
-    *   Supports Dynamic Bones.
-    *   **Magica Cloth Integration:** Automatically triggers a data rebuild for `MagicaRenderDeformer`, `VirtualDeformer`, `BoneCloth`, and `MeshCloth` after merging to prevent "exploding" mesh issues.
-*   **Advanced Mesh & Material Tools:**
-    *   **UV Validation:** Automatically fill missing UVs, fix overlapping UVs, and correct inverted UV winding.
-    *   **Material Consolidation:** Merge duplicate materials by shader and texture to reduce draw calls.
-    *   **Smart Material Matching:** Match materials by name similarity and shader type.
-*   **Blend Shape Tools:**
-    *   **Task-Based Workflow:** Blend shape transfer runs as a task list with per-task direction, source/target, generation, and animation-copy options.
-    *   **Weight Transfer:** Copy blend shape weights between base and outfit meshes or direct mesh-to-mesh targets.
-    *   **Frame Generation:** Generate blend shapes on avatar meshes or outfit meshes from source meshes with topology matching.
-    *   **Add to Existing Animations:** Finds existing clips animating the original source blendshape and adds matching curves for the generated target mesh.
-    *   **Smart Generation:** Use topology-aware algorithms for better blend shape quality.
-*   **Validation & Quality Control:**
-    *   **Pre-Merge Validation:** Check for missing bones and invalid meshes before merging.
-    *   **Post-Merge Verification:** Verify bounds and probe anchor settings after merge.
-    *   **Bone Chain Validation:** Validate common bone chains (spine, legs, arms) for completeness.
-*   **Comprehensive Logging:**
-    *   **Root-Level Logging Controls:** One `Logging` dropdown (`Errors Only`, `Errors + Warnings`, `All Details`) and one `Verbose Logging` dropdown (`Simple`, `Detailed`).
-    *   **Readable Summary Logs:** Normal output focuses on operation summaries; Detailed mode adds deeper diagnostics for investigation.
-
----
-
-## 📦 Requirements
-
-*   Unity 2021.3+
-*   **ChilloutVR CCK** (Imported in the project)
-*   **[NDMF](https://github.com/bdunderscore/ndmf) 1.4.1+**
-*   **[Chillaxins](https://docs.hai-vr.dev/docs/products/chillaxins) 1.1.0+** (Required for the plugin to load via VPM)
-*   *(Optional)* **Magica Cloth** (If merging cloth components)
-
----
-
-## 🚀 Setup Guide
-
-### 1. Installation
-
-**Option A: Via Unity Package Manager (Git URL)**
-1. Open Unity Package Manager (Window → Package Manager)
-2. Click the **+** button in the top-left corner
-3. Select **Add package from git URL...**
-4. Enter: `https://github.com/MilchZocker/NDMF-Merge.git#upm`
-5. Click **Add**
-
-**Option B: Manual Installation**
-Copy the `NDMF-Merge` folder into your project's `Packages/` directory.
-
-### 2. Prepare the Scene
-1.  Place your **Base Avatar** in the scene.
-2.  Place your **Outfit Prefabs** in the scene keeping them separate ensures they don't get uploaded twice if you forget to remove them.
-3.  **Disable the Outfit GameObjects** if you don't want them visible by default, OR leave them enabled if you want them to be part of the base mesh. *NDMF Merge will handle the instantiation.*
-
-### 3. Add the Component
-Select your **Base Avatar** (the object with the `CVRAvatar` component).
-Click **Add Component** -> search for **CVR Merge Armature**.
-
-### 4. Configure Outfits
-In the `CVR Merge Armature` inspector:
-1.  Click **+** under the **Outfits to Merge** list.
-2.  Drag your Outfit Prefab into the **Outfit** slot.
-3.  Choose **Merge Mode**:
-    *   **Armature Mode** for clothing, body parts, hair, and other skinned hierarchies.
-    *   **Object Mode** for props/accessories that should be placed or weighted without armature merging.
-4.  *(Optional)* Set the **Mesh Prefix** (e.g., `Hoodie_`) to easily identify meshes in the final build.
-5.  *(Important)* Configure **Prefix/Suffix** stripping if the outfit uses different bone naming.
-
-### 5. Detect and Resolve Conflicts
-1.  Click the **🔍 Detect Mismatches** button in the Bone Conflicts section.
-2.  The tool will scan for bones that exist in both the Base Avatar and the Outfit.
-3.  Scroll down to **Bone Conflicts**. You will see a list of matching bones with position/rotation/scale differences.
-4.  **Review Resolutions:**
-    *   **Force Merge (Snap) - Default:** The outfit bone is deleted, and its children/weights are moved to the Base Avatar's bone. Use for exact matches.
-    *   **As Child, Keep Position and Rotation:** The outfit bone is kept and reparented under the target bone while preserving world pose.
-    *   **Rename (Keep Separate):** Keeps the bone entirely separate with a unique name. Use for bones that shouldn't merge.
-    *   **Don't Merge (Delete/Ignore):** Skips merging this bone entirely.
-    *   **Merge Into Selected...:** Specify a custom target bone for this merge.
-
-### 6. Configure Advanced Settings (Optional)
-Expand the various sections to customize:
-*   **🌐 Global Outfit Defaults:** Set default values for all outfits
-*   **Log Output:** Choose the global logging severity and verbose mode
-*   **🔗 Global Bone Matching:** Enable fuzzy matching, Levenshtein distance, add global bone mappings
-*   **🎬 Animator Merging Options:** Enable animation path rewriting, avatar mask merging, and layer combining
-*   **Armature Merging:** Configure scale normalization, Apply Transform-Like baking, and bindpose compensation
-*   **⚠️ Conflict Detection & Resolution:** Configure tolerance thresholds and default resolution behavior
-*   **🔧 Advanced Tools:** Configure BlendShape Transfer, UV/material tools, and validations
-*   **⚙ Advanced Settings:** Configure component merging, exclusions, and the global animator master switch
-*   **📊 Preview & Analysis:** View hierarchy comparison and merge statistics
-
-### 7. Bake
-Simply upload your avatar or use **Manual Bake** in NDMF settings. NDMF runs automatically during the build process.
-
-**Recommended:** Use **Manual Bake** first to inspect the result before upload, especially for Magica Cloth setups.
-
----
-
-## ⚙️ Detailed Configuration
-
-### Per-Outfit Settings
-
-For each entry in the "Outfits to Merge" list:
-
-#### Basic Settings
-| Setting | Description |
-| :--- | :--- |
-| **Outfit** | The GameObject (prefab) of the clothes/props you want to add. |
-| **Merge Mode** | Choose **Armature Mode** for full armature merging or **Object Mode** for props/accessories that should only be placed or weighted onto the avatar. |
-| **Prefix / Suffix** | Text to *remove* from the outfit's bone names so they match the Base Avatar. <br>*(Ex: If outfit has `Hoodie_Hips`, set Prefix to `Hoodie_` so it matches `Hips`)*. |
-| **Unique Bone Prefix** | Text to *add* to bones that **don't** find a match. This prevents naming collisions for non-humanoid bones. |
-| **Mesh Prefix** | Added to the name of every mesh object from this outfit. Helps organize the hierarchy. |
-
-#### Object Mode Settings
-These settings are used only when **Merge Mode** is set to **Object Mode**.
-
-| Setting | Description |
-| :--- | :--- |
-| **Positioning Mode** | Choose how the object is placed: place under a selected GameObject, weight meshes to a target bone at the current position, place using a reference object, or place using explicit local values. |
-| **Target GameObject** | Base-avatar object used as the parent for the merged object. |
-| **Target Bone** | Bone used by the weighting placement mode. |
-| **Reference Object** | Reference transform used by reference placement mode. |
-| **Position / Rotation / Scale Values** | Explicit local offsets used by the value-based placement mode. |
-
-#### Animator Settings
-| Setting | Description |
-| :--- | :--- |
-| **Merge Animator (Basic)** | If checked, merges the outfit's Animator Controller layers and parameters into the main avatar. Skips AAS autogenerated layers. |
-| **Merge Animator (+AAS Layers)** | If checked, includes AAS autogenerated layers in the merge. |
-
-#### Per-Outfit Fixes
-| Setting | Description |
-| :--- | :--- |
-| **Bounds Fix Mode** | Fix SkinnedMeshRenderer bounds to prevent frustum culling issues.<br>• **None:** Don't modify bounds<br>• **CopyFromSelected:** Copy bounds from reference body mesh<br>• **RecalculateFromMesh:** Recalculate bounds from mesh geometry |
-| **Reference Body Mesh** | Body SkinnedMeshRenderer to use as reference for bounds/probe settings. If empty, auto-detects a body mesh. |
-| **Probe Anchor Sync Mode** | Sync probe anchor from body mesh.<br>• **None:** Don't modify probe anchors<br>• **AutoDetect:** Automatically find and use body mesh<br>• **CopyFromSelected:** Use specified reference mesh |
-| **Reference Probe Anchor Mesh** | Mesh to use as probe anchor reference. If empty, uses referenceBodyMesh or auto-detects. |
-| **Force Scale To One** | Force outfit root scale to (1,1,1) before merging to prevent distortion. |
-| **Remove Unused Bones** | After merge, delete outfit bones that have no vertex weights and no child objects/components. |
-
-#### Per-Outfit Bone Mapping
-| Setting | Description |
-| :--- | :--- |
-| **Bone Name Mappings** | Optional extra bone mappings for this specific outfit. Overrides global mappings. |
-
----
-
-### Global Settings
-
-#### 🔗 Global Bone Matching
-Advanced bone matching options that apply to all outfits:
-
-| Setting | Description |
-| :--- | :--- |
-| **Enable Fuzzy Bone Matching** | If exact name matching fails, try mapping list and/or Levenshtein fuzzy matching. |
-| **Global Bone Name Mappings** | Global mapping dictionary for bone names (after prefix/suffix stripping). Example: Map 'pelvis' → 'Hips'. |
-| **Enable Levenshtein Bone Matching** | Enable fuzzy matching using edit distance algorithm. Useful for typos or slight naming variations. |
-| **Max Levenshtein Distance** | Maximum edit distance allowed (1-10). Lower values = stricter matching. |
-
-#### 🎭 Semantic Bone Matching
-Use synonyms and patterns to match bones with different naming conventions:
-
-| Setting | Description |
-| :--- | :--- |
-| **Enable** | Enable semantic bone matching using synonyms and patterns. |
-| **Verbose Logging** | Enable detailed logging for semantic bone matching operations. |
-| **Synonyms** | List of bone name synonyms (e.g., 'pelvis' → 'Hips', 'upperarm' → 'UpperArm'). |
-| **Patterns** | Generic wildcard patterns to match common bones (e.g., `*hips*`, `*spine*`). |
-| **Case Insensitive** | Treat pattern matching as case-insensitive. |
-| **Enable L/R Variations** | Handle left/right naming variations (e.g., '.L', '_L', 'Left'). |
-| **Left Patterns** | Tokens identifying LEFT side bones (default: `.L`, `_L`, ` L`, `Left`, `left`). |
-| **Right Patterns** | Tokens identifying RIGHT side bones (default: `.R`, `_R`, ` R`, `Right`, `right`). |
-
-#### 🎬 Animator Merging (Global Improvements)
-Advanced animator merging features:
-
-| Setting | Description |
-| :--- | :--- |
-| **Rewrite Animation Paths** | Automatically rewrite AnimationClip binding paths to match the merged hierarchy. Strips outfit name prefixes from paths. |
-| **Merge Avatar Masks** | If multiple incoming layers share the same original name, merge their AvatarMasks (union). |
-| **Combine Layers By Name** | Merge layers by original layer name instead of always creating unique (outfit-prefixed) layer names. |
-
-#### 🦴 Armature Merging
-Controls pre-merge normalization and bindpose compensation.
-
-| Setting | Description |
-| :--- | :--- |
-| **Enable Scale Normalization** | Normalize transforms before merge to reduce distortion. |
-| **Normalization Scope** | Apply normalization to outfit clones only, or to the base avatar armature and outfits. |
-| **Normalization Mode** | **Scale Only (Legacy)** bakes scale into children. **Apply Transform-Like** can bake position/rotation into mesh data while keeping the hierarchy stable. |
-| **Apply Scale To All Transforms** | Bake scale through the full hierarchy, including bones and non-mesh objects. Default is **off**. |
-| **Protect Skinned Skeleton** | Exclude skinned bone chains from normalization when appropriate. |
-| **Apply Position/Rotation To Static Meshes** | In Apply Transform-Like mode, bake transform data into MeshFilter meshes. |
-| **Apply Position/Rotation To Skinned Meshes** | In Apply Transform-Like mode, bake transform data into skinned meshes and update bindposes. |
-| **Compensate Bindposes On Bone Remap** | Preserve mesh shape by baking source-to-target deltas into bindposes when bones are remapped. |
-| **Compensate Auto-Mapped Bones** | Extend bindpose compensation to automatic name/fuzzy matches as well as explicit conflicts. |
-
-#### 🌐 Global Outfit Defaults
-Set default values for all outfits (individual outfit settings override these):
-
-| Setting | Description |
-| :--- | :--- |
-| **Global Bone Prefix** | Default prefix to strip from bone names. |
-| **Global Bone Suffix** | Default suffix to strip from bone names. |
-| **Global Bounds Fix Mode** | Default bounds fix mode for all outfits. |
-| **Global Reference Body Mesh** | Default body mesh for bounds/probe settings. |
-| **Global Probe Anchor Sync Mode** | Default probe anchor sync mode. |
-| **Global Reference Probe Anchor Mesh** | Default probe anchor reference mesh. |
-| **Global Force Scale To One** | Default: force outfit root scale to (1,1,1). |
-| **Global Remove Unused Bones** | Default: remove unused bones after merge. |
-| **Global Merge Animator** | Default: merge outfit animators (basic mode). |
-| **Global Merge Animator Including AAS** | Default: merge outfit animators including AAS layers. |
-
-**Apply to All Outfits Now** button instantly applies global defaults to all existing outfits.
-
-#### 🧵 Mesh & UV Tools
-
-**UV Validation Settings:**
-| Setting | Description |
-| :--- | :--- |
-| **Fill Missing UVs** | If missing UVs are detected, generate simple default UV coordinates. |
-| **Auto Fix Overlapping** | Automatically fix overlapping UVs using basic heuristic detection. |
-| **Auto Fix Inverted** | Automatically fix inverted UV winding if detected. |
-
-**Material Consolidation Settings:**
-| Setting | Description |
-| :--- | :--- |
-| **Consolidate By Shader And Texture** | Consolidate materials that share the same shader and main texture. |
-| **Reuse Existing Materials** | Reuse identical materials across outfits to reduce draw calls. |
-| **Merge Duplicate Materials** | Merge duplicate materials found within the same outfit. |
-| **Consolidate Materials** | Consolidate materials into shared instances (master toggle). |
-| **Match By Name** | Match materials by name similarity using threshold. |
-| **Match By Shader** | Match materials by shader type. |
-| **Name Similarity Threshold** | Similarity threshold for name-based matching (0-1). Higher = stricter matching. |
-
-#### 🙂 Blend Shape Transfer
-Transfer or generate blend shapes between meshes using a task list.
-
-**Task List Behavior:**
-| Setting | Description |
-| :--- | :--- |
-| **Tasks** | Ordered list of Blend Shape tasks. Each task can do weight transfer, frame generation, or both. |
-| **+ Add Blend Shape Task** | Append a new task. |
-| **Up / Down / Duplicate / Delete** | Reorder or manage individual tasks. |
-
-**Per-Task Settings:**
-| Setting | Description |
-| :--- | :--- |
-| **Enabled** | Enable or disable this task. |
-| **Direction** | Choose **Outfit -> Base**, **Base -> Outfit**, **Both Directions**, or **Mesh -> Mesh**. |
-| **Enable Weight Transfer** | Copy current blendshape weight values using this task. |
-| **Source Mesh / Target Mesh** | Mesh references used by Mesh -> Mesh transfer or generation. |
-| **Match By Name** | Match blendshapes by name when transferring weights. |
-| **Min Weight Threshold** | Skip low-weight transfers below this value. |
-| **Use Smart Weight Transfer** | Use topology-aware scaling when copying weight values. |
-| **Enable Generation** | Generate actual blendshape frames on target meshes. |
-| **Blend Shapes (comma-separated)** | Limit generation to named blendshapes. Leave empty to process all blendshapes on the source mesh. |
-| **Generation Targets** | For non-mesh-to-mesh tasks, choose Base Avatar, individual outfits, or Apply To All. |
-| **Transfer Method** | Choose the frame generation method: Approximate, K-Nearest Blended, or Bounds Normalized Nearest. |
-| **Max Mapping Distance** | Maximum vertex mapping distance for approximate generation. |
-| **Use Smart Frame Generation** | Use topology-aware frame scaling for better results. |
-| **Override Existing** | Replace matching destination blendshapes if they already exist. |
-| **Add to Existing Animations** | Duplicate matching blendshape curves onto generated target meshes. Modified clips are copied first and re-bound only inside the clone. |
-
-#### ⛓ Bone Chain Validation
-Validate common bone chains for completeness:
-
-| Setting | Description |
-| :--- | :--- |
-| **Enable** | Enable validation of common bone chains (spine, legs, arms). |
-| **Warn On Missing** | Log warnings for missing or broken chains. |
-
-#### ✅ Validation (Pre/Post)
-
-**Pre-Merge Validation:**
-| Setting | Description |
-| :--- | :--- |
-| **Check Missing Bones** | Check for missing bones referenced by meshes before merge. |
-| **Check Mesh Integrity** | Check for null/invalid meshes or components. |
-
-**Post-Merge Verification:**
-| Setting | Description |
-| :--- | :--- |
-| **Check Bounds** | Verify bounds were applied and look sane after merge. |
-| **Check Probes** | Verify probe anchor settings were copied where requested. |
-
-#### ⚙ Advanced Settings
-
-**Component Merging / Safety:**
-| Setting | Description |
-| :--- | :--- |
-| **Merge Dynamic Bones** | Move Dynamic Bone components to merged hierarchy. |
-| **Merge Magica Cloth** | Move Magica Cloth components and trigger data rebuild. |
-
-**CVR Component Merging:**
-| Setting | Description |
-| :--- | :--- |
-| **Merge Advanced Avatar Setup** | Merge Advanced Avatar Settings (AAS) menus and toggles. |
-| **Generate AAS Controller At End** | (Highly Recommended) Regenerate the main Animator Controller after all merging to ensure toggles work correctly. |
-| **Advanced Settings Prefix** | Add prefix to merged parameter names to avoid collisions (e.g., merging two outfits with same parameter name). |
-| **Merge Advanced Pointer Trigger** | Currently not implemented. The toggle exists, but the merge path still logs a skip. |
-| **Merge Parameter Stream** | Merge CVR Parameter Stream components. |
-| **Merge Animator Driver** | Merge CVR Animator Driver components. Auto-splits if >16 parameters. |
-
-**Animator Merging (Master):**
-| Setting | Description |
-| :--- | :--- |
-| **Merge Animator** | Master switch. If disabled, no animators are merged regardless of per-outfit settings. |
-
-#### 🔍 Bone Conflict Resolution
-
-**Global Tolerance Settings:**
-| Setting | Description |
-| :--- | :--- |
-| **Position Threshold** | Position difference (meters) to consider a conflict. Default: 0.001m. |
-| **Rotation Threshold** | Rotation difference (degrees) to consider a conflict. Default: 0.5°. |
-| **Detect Scale Conflicts** | If enabled, scale differences will be flagged as conflicts. |
-| **Scale Threshold** | Scale difference (vector magnitude) to consider a conflict. Default: 0.01. |
-| **Default Bone Conflict Resolution** | Default resolution when a mismatch is detected: Force Merge (Snap), As Child, Keep Position and Rotation, Rename, Don't Merge, or Merge Into Selected. |
-
-**Conflict Detection:**
-1. Click **🔍 Detect Mismatches** button
-2. Review detected conflicts in the Bone Conflicts list
-3. Choose resolution per bone:
-   - **Force Merge (Snap):** Delete outfit bone, move children/weights to avatar bone
-    - **As Child, Keep Position and Rotation:** Keep outfit bone and reparent it under the target while preserving world pose
-   - **Rename (Keep Separate):** Keep bones separate with unique names
-   - **Don't Merge (Delete/Ignore):** Skip merging this bone entirely
-   - **Merge Into Selected...:** Specify custom target bone
-
-#### 🚫 Exclusions
-Exclude specific objects from merge:
-
-| Setting | Description |
-| :--- | :--- |
-| **Excluded Transforms** | Specific objects to ignore during merge. |
-| **Excluded Name Patterns** | Use wildcards (e.g., `*Constraint*`, `*_Ignore`) to skip objects based on name matching. |
-
-#### 🐛 Debug & Logging
-
-| Setting | Description |
-| :--- | :--- |
-| **Logging** | Global severity filter: **Errors Only**, **Errors + Warnings**, or **All Details**. Default is **Errors Only**. |
-| **Verbose Logging** | Style selector: **Simple** keeps logs compact, **Detailed** enables deeper diagnostics when Logging is set to **All Details**. |
-
-#### 📊 Preview & Analysis
-
-**Hierarchy Comparison:**
-| Setting | Description |
-| :--- | :--- |
-| **Show Hierarchy Comparison** | Toggle to display side-by-side hierarchy preview showing exact bone matching results. |
-| **Max Lines Per Outfit** | Limit preview lines per outfit (50-2000) to prevent UI lag. |
-
-The Hierarchy Comparison shows:
-- Current merge settings summary (Fuzzy Matching, Levenshtein, Semantic Matching)
-- Side-by-side avatar and outfit armatures
-- Match reasons for each bone (exact, global map, semantic synonym, outfit map, levenshtein, semantic pattern, semantic L/R)
-- Final bone names after merge
-- Unique bones that will be added to avatar
-- Per-outfit foldout for detailed inspection
-
-**Merge Statistics Preview:**
-| Setting | Description |
-| :--- | :--- |
-| **Show Preview & Stats** | Display comprehensive merge statistics before build. |
-| **🔄 Button** | Refresh statistics cache. |
-
-Preview shows:
-- Total outfits, meshes, materials, vertices, triangles
-- Bones to merge, constraint, rename, add as unique
-- Conflict resolution summary
-- Per-outfit breakdown (meshes, materials, bones, conflicts)
-- Component counts (AAS, Animator Drivers, Parameter Streams, etc.)
-- Animator layer and parameter counts
-
----
-
-## 🔧 Troubleshooting & Tips
-
-**1. "My clothes are exploding!" (Magica Cloth)**
-The plugin attempts to rebuild Magica Cloth data automatically. However, if the mesh order changes significantly, Magica can get confused.
-*   **Fix:** Ensure **Merge Magica Cloth** is enabled.
-*   **Fix:** Enable **Armature Merging → Enable Scale Normalization**.
-*   **Fix:** Try **Apply Transform-Like** if classic scale normalization is not sufficient.
-*   **Fix:** Try using **Manual Bake** in NDMF settings to inspect the result before upload.
-
-**2. "My animations aren't working."**
-*   Check **Generate AAS Controller At End** is enabled.
-*   Ensure **Merge Animator** (master switch) is checked.
-*   Check the per-outfit **Merge Animator** setting is enabled on the specific outfit.
-*   Enable **Rewrite Animation Paths** to automatically fix animation clip paths.
-*   If the outfit uses Write Defaults OFF but your avatar uses ON, the plugin attempts to match the Avatar's setting. Check the Console logs for "Write Defaults" warnings.
-
-**3. "Bones are stretching weirdly."**
-This happens when the outfit's armature doesn't align perfectly with the base armature.
-*   **Fix:** Click **🔍 Detect Mismatches** in the Bone Conflicts section.
-*   **Fix:** Find the problematic bone (e.g., `Hips` or `Spine`) and change the resolution to **As Child, Keep Position and Rotation** if direct force-merge causes deformation.
-*   **Fix:** Keep **Compensate Bindposes On Bone Remap** enabled so skinned meshes preserve shape when bones are remapped.
-*   **Alternative:** Enable **Semantic Bone Matching** and add synonyms for mismatched bone names.
-
-**4. "UVs are broken/black on merged meshes."**
-*   Enable **UV Validation Settings → Fill Missing UVs** to auto-generate missing UV coordinates.
-*   Enable **Auto Fix Overlapping** if you see UV overlap issues.
-*   Enable **Auto Fix Inverted** if UVs appear flipped.
-*   Set **Logging = All Details** and **Verbose Logging = Detailed** if you need deep UV diagnostics.
-
-**5. "Materials are duplicated/not consolidating."**
-*   Enable **Material Consolidation Settings → Consolidate Materials**.
-*   Enable **Reuse Existing Materials** to reduce draw calls.
-*   Enable **Merge Duplicate Materials** to combine identical materials within outfits.
-*   Adjust **Name Similarity Threshold** if name-based matching is too strict/loose.
-*   Set **Logging = All Details** and **Verbose Logging = Detailed** to inspect detailed material remap output.
-
-**6. "Blend shapes are missing/not transferring."**
-*   Check the **BlendShape Transfer** task list and confirm the task is **Enabled**.
-*   Ensure the task **Direction** matches the intended source and target.
-*   Ensure **Match By Name** is enabled if blend shape names match.
-*   For generating new blend shapes, set **Enable Generation** and provide the correct source mesh.
-*   Set **Max Mapping Distance** higher if vertices aren't mapping correctly (typical: 0.01m).
-*   Enable **Use Smart Frame Generation** for better topology-aware results.
-*   If you expect generated blendshapes to follow existing animations, enable **Add to Existing Animations**.
-
-**7. "Bones aren't matching with similar names."**
-*   Enable **Fuzzy Bone Matching** first (master toggle) in Global Bone Matching.
-*   Enable **Levenshtein Bone Matching** for typo tolerance.
-*   Set **Max Levenshtein Distance** to 1-2 for similar names (lower = stricter).
-*   Use **Semantic Bone Matching** with synonyms for known naming differences (e.g., 'pelvis' → 'Hips').
-*   Add wildcard patterns in **Semantic Bone Matching → Patterns** (e.g., `*spine*`, `*arm*`).
-
-**8. "Performance is slow during merge."**
-*   Set **Logging** to **Errors + Warnings** or **Errors Only**.
-*   Keep **Verbose Logging** on **Simple** unless you are actively debugging.
-*   Disable **Bone Chain Validation** if you don't need chain completeness checks.
-*   Disable **Pre-Merge Validation** and **Post-Merge Verification** if you're confident in your setup.
-
-**9. "External references are broken after merge."**
-If you have a script on the Avatar referencing a GameObject inside the Outfit prefab, the **Universal Remapper** will attempt to find the *merged* version of that object and update the reference. If it fails, the reference will be null.
-*   **Tip:** Ensure the object names are unique enough to be resolved.
-*   **Tip:** Bone references that were merged away are remapped using the stored source-to-target merge map, so direct references to merged bones should follow the surviving target.
-*   **Tip:** Check the Console for remapping warnings.
-*   **Tip:** Set **Logging = All Details** and **Verbose Logging = Detailed** to inspect remap diagnostics.
-
-**10. "Write Defaults conflicts."**
-*   The plugin auto-detects Write Defaults from your base avatar's controller.
-*   Check the Console for Write Defaults warnings during merge.
-*   Manually ensure all outfit animators use the same Write Defaults setting as your base avatar.
-
-**11. "Hierarchy Comparison shows unexpected matches."**
-*   The Hierarchy Comparison preview in the inspector mirrors the exact runtime merge order:
-    1. Exact name match (after prefix/suffix stripping)
-    2. Global Bone Name Mappings (if Fuzzy Matching enabled)
-    3. Semantic synonyms (if Semantic Matching enabled)
-    4. Per-outfit bone mappings (overrides earlier)
-    5. Levenshtein fuzzy matching (if enabled)
-    6. Semantic patterns and L/R variations (if enabled)
-*   Enable "Show Hierarchy Comparison" and review the match reasons to understand why bones are being matched.
-*   Adjust mapping priority by modifying global vs per-outfit mappings.
-
----
-
-## 🔌 Plugin Functions
-
-The plugin operates in three NDMF build phases:
-
-### BuildPhase.Resolving - Merge Armatures
-**Main merging phase that processes all outfits:**
-
-- `ProcessMerger()` - Master orchestrator for outfit merging
-- `NormalizeTransformsBeforeMerge()` - Normalizes scale and optionally applies Apply Transform-Like mesh baking before merge
-- `MergeOutfitWithoutDestroy()` - Core merge logic for individual outfits
-- `BuildBoneMappingWithConflicts()` - Creates bone correspondence between outfit and avatar armatures with conflict resolution
-- `FindBodyReferenceMesh()` - Auto-detects body mesh by vertex count for bounds/probe reference
-- `ApplyBoundsFix()` - Fixes SkinnedMeshRenderer bounds using selected mode
-- `RemoveUnusedBones()` - Cleans up bones with no vertex weights or children
-- `ValidateBoneChains()` - Checks spine, leg, and arm bone chains for completeness
-- `RunPreMergeValidation()` - Checks for missing bones and mesh integrity before merge
-- `RunPostMergeVerification()` - Verifies bounds and probe anchors were applied correctly
-
-**Bone Matching System:**
-- `FindBoneByName()` - Exact name matching
-- `FindBoneByLevenshtein()` - Fuzzy matching using edit distance algorithm
-- `MatchesAnyPattern()` - Wildcard pattern matching (* and ? supported)
-- `FindBoneByPatterns()` - Pattern-based bone discovery for semantic matching
-
-### BuildPhase.Transforming - Merge Animators
-**Animator merging and CVR component processing:**
-
-- `MergeAnimators()` - Merges animator controllers and parameters
-- `RewriteAnimationPaths()` - Updates animation clip bindings to match merged hierarchy
-- `DetectWriteDefaults()` - Auto-detects Write Defaults setting from base controller
-- `MergeAvatarMasks()` - Combines avatar masks from layers with matching names
-- `MergeAdvancedAvatarSettings()` - Combines AAS menus and parameters
-- `MergeAnimatorDriversWithSplit()` - Merges CVR Animator Drivers and auto-splits if >16 parameters
-- `MergeParameterStream()` - Combines CVR Parameter Stream components
-- `RemapExternalReferencesUniversal()` - Rewrites clone-scoped references to merged objects after armature merge
-
-### BuildPhase.Transforming - Generate AAS Controller At End
-**Final controller regeneration:**
-
-- `GenerateAASControllerAtEnd()` - Regenerates main animator controller to ensure all toggles work
-- Invokes CVR's `CreateAASController()` method via reflection
-- Ensures AAS menu parameters are properly wired to animations
-- Creates unique animator controller asset per avatar instance
-
-### Post-Merge Utilities
-
-- `ApplyAnimationClipReplacementsInClone()` - Rebinds clone-side controller/component clip references to copied clips when rewrite/copy features modify animations
-- `RemapExternalReferencesUniversal()` - Deep serialized + reflection remapping of clone-scoped references to merged objects
-- `RebuildMagicaData()` - Triggers Magica Cloth data rebuild (MagicaRenderDeformer, VirtualDeformer, BoneCloth, MeshCloth)
-- `ValidateUVs()` - Checks and fixes missing/overlapping/inverted UVs
-- `ConsolidateMaterials()` - Merges duplicate materials to reduce draw calls
-- `TransferBlendShapeWeights()` - Copies blend shape weights between meshes
-- `GenerateBlendShapes()` - Creates blend shape frames on target meshes from source
-
----
-
-## 📋 Advanced Features
-
-### Animation Path Rewriting
-When **Rewrite Animation Paths** is enabled, the plugin automatically:
-- Strips outfit name prefixes from animation clip binding paths
-- Validates new paths exist in the merged hierarchy
-- Handles both float curves (transforms, blend shapes) and object reference curves (material swaps, toggles)
-- Preserves all keyframe data, tangents, and timing information
-- Duplicates only the clips that need modification and rebinds clone-side references to those copies
-- Traverses direct state motions and blend trees
-
-Example: `"OutfitName/Armature/Hips"` → `"Armature/Hips"`
-
-### Semantic Bone Matching
-Powerful bone matching system that goes beyond exact name matching:
-- **Synonyms:** Map `'pelvis'` → `'Hips'`, `'upperarm'` → `'UpperArm'`, etc.
-- **Patterns:** Use wildcards like `*spine*`, `*arm*`, `*leg*` to match common bone groups
-- **L/R Variations:** Automatically handles `.L`/`.R`, `_L`/`_R`, `Left`/`Right` naming
-- **Case Insensitive:** Optional case-insensitive matching
-
-### Material Consolidation
-Intelligent material merging reduces draw calls:
-- Matches materials by shader type and main texture
-- Uses name similarity scoring (configurable threshold)
-- Reuses identical materials across multiple outfits
-- Merges duplicate materials within single outfits
-
-### Blend Shape Generation
-Create blend shapes on outfit meshes from source meshes:
-- **Topology Matching:** Maps vertices between meshes using spatial proximity
-- **Smart Weight Scaling:** Uses topology-aware algorithms for better quality
-- **Selective Generation:** Generate specific blend shapes by name or all at once
-- **Multi-Target:** Generate on base body mesh and/or multiple outfit meshes simultaneously
-- **Animation Curve Copying:** Optionally add matching blendshape curves to generated target meshes by copying clips non-destructively inside the clone
-
-### Preset System
-Save and load merge configurations:
-- **Save Current as Preset:** Captures current settings (bounds mode, bone mappings, prefixes, etc.)
-- **Load Preset:** Applies saved settings to the current component
-- **Delete Preset:** Removes saved presets from the list
-- Organize by preset name, description, and outfit type
-- Presets include: bounds fix mode, probe anchor settings, scale/bone removal flags, bone name mappings, prefixes
-
-### Hierarchy Comparison Preview
-Interactive bone matching visualization:
-- Shows side-by-side comparison of avatar and outfit armatures
-- Displays exact match reasons for each bone (exact, global map, semantic synonym, levenshtein, etc.)
-- Shows final bone names after all transformations
-- Highlights unique bones that will be added to avatar
-- Per-outfit foldout for detailed inspection
-- Mirrors exact runtime merge logic for accurate preview
-
----
-
-## 🎓 Best Practices
-
-### Workflow Tips
-1. **Always use Manual Bake first** (in NDMF settings) before uploading to test the result.
-2. **Set Logging to All Details** for the first merge of a new outfit to catch issues early.
-3. **Use Global Outfit Defaults** for consistent settings across all outfits.
-4. **Detect Conflicts** before every merge to handle bone mismatches properly.
-5. **Enable Generate AAS Controller At End** to ensure toggles work correctly.
-
-### Bone Matching Strategy
-1. Start with **exact name matching** (default - after prefix/suffix stripping).
-2. If bones don't match, add **Global Bone Name Mappings** for known differences (requires Fuzzy Matching enabled).
-3. Enable **Semantic Bone Matching** with synonyms for common naming variations (e.g., 'pelvis' → 'Hips').
-4. Use **Levenshtein Fuzzy Matching** for typo tolerance (set max distance 1-3 for best results).
-5. For complex armatures with unique names, use wildcard **Patterns** in Semantic Matching.
-6. Always use the **Detect Mismatches** button to identify all conflicts and choose appropriate resolutions.
-
-**Bone Matching Order (Runtime):**
-1. Check bone conflicts list for explicit resolution
-2. Strip prefix/suffix from outfit bone name
-3. Check per-outfit bone mappings
-4. Apply combined mappings (Global → Semantic Synonyms → Per-Outfit overrides)
-5. Try exact name match
-6. If Fuzzy Matching + Levenshtein enabled: try fuzzy match
-7. If Semantic Matching enabled: try pattern matching + L/R variations
-
-### Performance Optimization
-1. Keep **Logging** at **Errors Only** or **Errors + Warnings** when not debugging.
-2. Keep **Verbose Logging** on **Simple** unless you need deep diagnostics.
-3. Use **Material Consolidation** to reduce draw calls on final avatar.
-4. Enable **Remove Unused Bones** to clean up hierarchy.
-5. Disable **Pre/Post Validation** once you're confident in your setup.
-
-### Magica Cloth Setup
-1. Ensure **Merge Magica Cloth** is enabled.
-2. Enable **Armature Merging → Enable Scale Normalization** to avoid scale-related explosions.
-3. Use **Manual Bake** to inspect cloth data before upload.
-4. If cloth still explodes, check for bone conflicts and consider **As Child, Keep Position and Rotation** instead of direct force-merge on problematic bones.
-
----
+NDMF Merge adds outfits, accessories, and armatures to a ChilloutVR avatar during an NDMF build. Configure sources on **CVR Merge Armature**, then use Manual Bake to inspect the merged avatar before uploading. Hierarchy and animation changes happen on the build clone; keep editing your original avatar and outfit assets.
+
+Use it alongside [NDMF Avatar Optimization](https://github.com/MilchZocker/NDMF-Avatar-Optimization) to optimize the resulting avatar.
+
+## Contents
+
+- [Requirements and installation](#requirements-and-installation)
+- [Quick start](#quick-start)
+- [Features and workflow updates](#features-and-workflow-updates)
+- [Armature Mode and bone matching](#armature-mode-and-bone-matching)
+- [Object Mode and target-bone weighting](#object-mode-and-target-bone-weighting)
+- [Configuration reference](#configuration-reference)
+- [Blend shape tasks](#blend-shape-tasks)
+- [Preview, presets, and logging](#preview-presets-and-logging)
+- [Troubleshooting](#troubleshooting)
+- [Build and release workflow](#build-and-release-workflow)
+
+## Requirements and installation
+
+| Dependency | Requirement |
+| --- | --- |
+| Unity | 2021.3 or newer, as declared in the manifest. Use a version supported by your CCK. |
+| ChilloutVR CCK | Import into the Unity project before configuring your avatar. |
+| [NDMF](https://github.com/bdunderscore/ndmf) | 1.4.1 or newer. |
+| [Chillaxins — MilchZocker fork](https://github.com/MilchZocker/chillaxins) | Use this fork (currently 1.3.0) for CVR build integration. The manifest's VPM minimum of 1.1.0 does not select the fork. |
+| Dynamic Bone / Magica Cloth | Optional, for outfits using those components. Magica rebuild support is compiled under `CCK_ADDIN_MAGICACLOTHSUPPORT`. |
+
+Install CCK, NDMF, and the **[MilchZocker Chillaxins fork](https://github.com/MilchZocker/chillaxins)** first. Unity Package Manager does not resolve `vpmDependencies`; install this fork explicitly when using a Git URL or local package. It uses the same `dev.hai-vr.chillaxins` package ID as upstream, so replace an existing upstream installation rather than installing both copies.
+
+### Install the Chillaxins fork
+
+In Unity Package Manager, select **+ → Add package from git URL…** and use the fork's source package:
+
+```text
+https://github.com/MilchZocker/chillaxins.git?path=/Packages/dev.hai-vr.chillaxins#main
+```
+
+After the fork's UPM release workflow has been merged and has published its first `upm` branch, the release URL is:
+
+```text
+https://github.com/MilchZocker/chillaxins.git#upm
+```
+
+Alternatively, download the fork's package ZIP from [its releases](https://github.com/MilchZocker/chillaxins/releases), extract it, and use **Add package from disk…** to select the extracted `package.json`. Close and reopen Unity after installation so the bundled libraries load. Follow the fork's README for build hooks and Manual Bake options; upstream package-manager listings do not install this fork.
+
+### Install NDMF Merge
+
+**Unity Package Manager:** open **Window → Package Manager → + → Add package from git URL…** and enter:
+
+```text
+https://github.com/MilchZocker/NDMF-Merge.git#upm
+```
+
+The `upm` branch contains the published package at its root. To use the development source directly from `main`, select its package subdirectory:
+
+```text
+https://github.com/MilchZocker/NDMF-Merge.git?path=/packages/NDMF-Merge#main
+```
+
+**Manual installation:** download or clone this repository and copy **`packages/NDMF-Merge`** into your Unity project's `Packages/` directory. Include the package's `.meta` files and `package.json`; do not copy the entire repository as a package.
+
+## Quick start
+
+1. Put your base avatar in the scene with its **CVRAvatar** component and configured Animator/AAS base controller.
+2. Add **NDMF Merge → CVR Merge Armature** to the same GameObject as **CVRAvatar**.
+3. Add an entry in **Outfits to Merge** and assign **Outfit**. Sources can be prefab assets or scene objects. Keep scene sources outside the base avatar hierarchy to avoid including both the source and the merged copy.
+4. Choose **Armature Mode** for skinned clothing or **Object Mode** for props and attachments. When assigning a source without a detectable armature, the inspector selects Object Mode automatically; check the selected mode.
+5. For Armature Mode, set bone prefixes/suffixes to strip, click **Detect Mismatches**, and review the resolutions. For Object Mode, choose a placement mode and its target as described below.
+6. If you need outfit animation layers, enable **Merge Animator (Basic)** or **Merge Animator (+AAS Layers)** on that entry. The global **Merge Animator** master switch must also be on. Per-outfit animator merging is off by default.
+7. Keep **Merge Advanced Avatar Setup** and **Generate AAS Controller At End** enabled when merging AAS menus. Check the AAS base controller and combined sync budget before building.
+8. Run NDMF **Manual Bake**. Inspect the hierarchy, test toggles and animations, and check deformation, culling, probes, and cloth. Edit the source avatar to adjust settings, then bake again.
+9. Upload through the CVR/Chillaxins build integration once the result is ready. Play Mode processing depends on your installed NDMF/Chillaxins setup.
+
+Outfit containers are temporary: their contents are merged or moved, then the containers are removed. Do not use the source container's enabled state as an outfit toggle. Configure the actual mesh/child objects and AAS animations for visibility, and verify them on the bake.
+
+## Features and workflow updates
+
+- **Two merge modes:** combine skinned armatures or place accessories using a parent, reference transform, explicit values, or a target bone.
+- **Target-bone weighting:** attach existing skeletons while preserving world pose and skin weights. Convert rigid meshes to single-bone skins on the build clone.
+- **Bone matching:** strip names, apply mappings, use optional semantic/fuzzy fallbacks, and choose a resolution for each mismatched bone.
+- **Armature Merging settings:** select normalization scope, Scale Only or Apply Transform-Like baking, skeleton protection, and bindpose compensation.
+- **Animator tools:** import layers and parameters, rewrite paths, optionally combine layers and masks, and align incoming Write Defaults with the detected base setting.
+- **CVR integration:** merge AAS settings, parameter streams, and animator drivers; split drivers above 16 entries. Advanced Pointer Trigger merging remains a placeholder.
+- **Safer AAS finalization:** run CCK Create + Attach once per target avatar, validate controller inputs and sync usage, isolate generated assets, and handle Manual Bake's asset import batching.
+- **Blend shape tasks:** configure weight copying and frame generation, choose mapping methods and targets, and optionally extend existing animations with generated curves.
+- **Clone-side repairs:** remap references to surviving bones and objects. Clips needing path or blend shape curve changes are copied and clone-side references are rebound.
+- **Mesh utilities:** bounds/probe fixes, basic UV tools, material reuse, bone-chain checks, pre-merge validation, and post-merge verification.
+- **Inspector workflow:** hierarchy comparison, statistics, presets, and root-level severity/verbosity controls.
+
+## Armature Mode and bone matching
+
+Use Armature Mode for outfits with skinned meshes and a bone hierarchy. The base avatar needs a detectable armature, and the outfit needs bones referenced by its skinned meshes.
+
+For example, to match `Hoodie_Hips` to `Hips`, set **Prefix** to `Hoodie_`. Use **Mesh Prefix**, such as `Hoodie_`, to identify outfit mesh objects, and **Unique Bone Prefix** for bones that should remain distinct.
+
+### Matching rules
+
+Explicit conflict resolutions take priority. For automatic matching, the tool builds a name mapping table in this order: **Global Bone Name Mappings → Semantic Synonyms → Per-Outfit Bone Name Mappings**. Later entries override the same source key. Global mappings require **Enable Fuzzy Bone Matching**; semantic synonyms require semantic matching; per-outfit mappings apply independently.
+
+After stripping the prefix/suffix, the tool applies the mapping table and looks for an exact target name. If no target is found, it can try Levenshtein matching, then semantic patterns and left/right variations. Levenshtein requires both **Enable Fuzzy Bone Matching** and **Enable Levenshtein Bone Matching**. Its default maximum distance is **1**; increase it carefully and review the matches. Semantic matching is off by default.
+
+Prefer explicit mappings such as `pelvis → Hips` for known differences. Semantic patterns support `*` and `?`, but broad patterns can select unintended bones. Unique-prefixed bones are kept separate from automatic matching.
+
+### Detect and resolve mismatches
+
+Click **Detect Mismatches** after changing sources, transforms, or matching settings. Detection clears and rebuilds the conflict list, so review and reapply custom resolutions afterward. It compares matching bone transforms using these defaults:
+
+| Setting | Default |
+| --- | --- |
+| Position Threshold | 0.001 m |
+| Rotation Threshold | 0.5° |
+| Detect Scale Conflicts | Enabled |
+| Scale Threshold | 0.01, measured as vector difference magnitude |
+| Default Bone Conflict Resolution | Force Merge (Snap) |
+
+| Resolution | Result / use |
+| --- | --- |
+| **Force Merge (Snap)** | Map the outfit bone to the target avatar bone. Bindpose compensation helps preserve the skinned mesh's shape. |
+| **As child, keep position and rotation** | Keep the outfit bone beneath the target with world pose preserved. Useful when direct merging distorts clothing. This reparents the bone. |
+| **Rename (Keep Separate)** | Rename the source bone with `_Renamed` and keep it separate from the target. |
+| **Don't Merge (Delete/Ignore)** | Skip mapping this bone to the target. Inspect the baked hierarchy and skinning before relying on it. |
+| **Merge Into Selected…** | Map to **Custom Target Bone**, which must be assigned. |
+
+## Object Mode and target-bone weighting
+
+Object Mode bypasses armature matching and its per-outfit bone/mesh repair path. Use an empty source container with the accessory's mesh objects and any skeleton beneath it. The container is removed after processing, so put renderers and components that must survive on child objects.
+
+The inspector permits Object Mode without a CVRAvatar, but the current build processor still requires **CVRAvatar on the merger GameObject**. Configure Object Mode on your base avatar.
+
+| Positioning Mode | Behavior |
+| --- | --- |
+| **Place Under Selected GameObject** | Move the container's direct children beneath **Target GameObject**, preserving world transforms. An unassigned parent falls back to the avatar root. |
+| **Place Using Reference** | Move direct children beneath the target parent and copy the resolved reference's world position/rotation and local scale. Assign **Reference Object**. |
+| **Place Using Values** | Set each direct child's local position, Euler rotation, and scale beneath the parent. Default mode: zero position/rotation, unit scale. Values replace each child's local transform. |
+| **Weight Meshes At Current Position To Target Bone** | Require a **Target Bone on the base avatar**. Attach existing bone hierarchy roots beneath it with world pose and skin weights preserved. Mesh and non-bone object branches stay under the avatar root. |
+
+In weighting mode, unskinned meshes are weighted 100% to the target bone. A `MeshRenderer`/`MeshFilter` pair becomes a `SkinnedMeshRenderer` using a copied mesh and a bindpose for the current placement. Existing skinned meshes retain their weights; skinned meshes with no bones receive a rigid single-bone skin.
+
+**Example: attach glasses to the head**
+
+1. Create an empty `GlassesSource` container with the glasses mesh beneath it. Align the source for the intended avatar placement.
+2. Add it to **Outfits to Merge**, select **Object Mode**, then **Weight Meshes At Current Position To Target Bone**.
+3. Assign the base avatar's `Head` bone to **Target Bone**. It must be outside the source outfit.
+4. Manual Bake and rotate the head on the baked avatar to check placement. Inspect the resulting renderer and bones.
+
+Weighting requires separate mesh objects and bone transforms below the container. A renderer on the container or a bone transform, a skeleton using the container itself as a bone, or an object containing both renderer types causes validation to fail.
+
+## Configuration reference
+
+### Global defaults and per-outfit options
+
+**Global Outfit Defaults** is an inspector bulk-apply tool. Changing it, or clicking **Apply to All Outfits Now**, copies values into the entries. Customize individual entries afterward; applying defaults again overwrites enum and boolean settings. Prefix/suffix and reference fields copy only when the global value is nonempty/non-null. Clear an entry directly when needed.
+
+| Per-outfit setting | Purpose / default |
+| --- | --- |
+| **Outfit / Merge Mode** | Source container and Armature/Object behavior. |
+| **Prefix / Suffix** | Strip text from bone names before matching. Empty. |
+| **Unique Bone Prefix / Mesh Prefix** | Separate unmatched bones or label mesh objects. Empty. |
+| **Bone Name Mappings** | Outfit-specific source-to-target name overrides. |
+| **Bounds Fix Mode** | `None` (default), `CopyFromSelected`, or `RecalculateFromMesh`. Recalculate uses the shared mesh's bounds. |
+| **Reference Body Mesh** | Body `SkinnedMeshRenderer` for copying bounds. Auto-detected if needed; assign explicitly if detection chooses the wrong mesh. |
+| **Probe Anchor Sync Mode** | `AutoDetect` (default), `CopyFromSelected`, or `None`. Copies the reference's anchor and probe usage settings. |
+| **Reference Probe Anchor Mesh** | Probe reference; may fall back to the bounds reference or auto-detection depending on mode. |
+| **Force Scale To One** | Reset the cloned outfit root scale. Off; this differs from transform baking. |
+| **Remove Unused Bones** | Optional cleanup after merging. Off. Inspect the result when other components reference bones. |
+| **Merge Animator (Basic)** | Import the controller while skipping layers identified as AAS autogenerated layers. Off. |
+| **Merge Animator (+AAS Layers)** | Include those generated layers too. Off. |
+
+Bone matching, mesh prefixes, bounds/probe fixes, UV/material processing, and blend shape tasks belong to the Armature Mode processing path. Object Mode handles placement/weighting separately; these utilities do not all run on object entries.
+
+### Armature Merging
+
+| Setting | Purpose / default |
+| --- | --- |
+| **Enable Scale Normalization** | Normalize before merging. On. |
+| **Normalization Scope** | `Outfits Only` (default) or `Base + Outfits`, on the build clone. |
+| **Normalization Mode** | `Scale Only (Legacy)` (default) or `Apply Transform-Like`. |
+| **Apply Scale To All Transforms** | Bake scale through bones and non-mesh objects. Off. |
+| **Protect Skinned Skeleton** | Protect skeleton chains used by skinned meshes. On. |
+| **Apply Position / Rotation To Static Meshes** | In Apply Transform-Like mode, bake selected transform components into static mesh data. Both on. |
+| **Apply Position / Rotation To Skinned Meshes** | Bake into skinned mesh data with bindpose updates. Both on. |
+| **Compensate Bindposes On Bone Remap** | Compensate source-to-target transform differences when remapping bones. On. |
+| **Compensate Auto Mapped Bones** | Extend compensation to name/fuzzy mappings rather than only explicit conflicts. On. |
+
+Start with defaults and inspect deformation after baking. Try Apply Transform-Like for transform-related issues; compare results before changing skeleton protection or normalizing the base.
+
+### Animator and CVR settings
+
+| Setting | Purpose / default |
+| --- | --- |
+| **Merge Animator** (master) | Allow controller imports enabled on outfit entries. On. |
+| **Rewrite Animation Paths** | Rewrite clip bindings for the merged hierarchy, including motions inside blend trees. Affected clips are copied. On. |
+| **Merge Avatar Masks** | Union masks for grouped incoming layers with the same original name. On. |
+| **Combine Layers By Name** | Group incoming layers by original name. Off; separate layers normally receive outfit-name prefixes. |
+| **Merge Advanced Avatar Setup** | Merge outfit AAS settings. On. |
+| **Generate AAS Controller At End** | Use CCK Create + Attach after merging; requires AAS merging too. On. |
+| **Advanced Settings Prefix** | Prefix merged AAS machine names. Empty. This is not a general namespace for all custom animator parameters. |
+| **Merge Parameter Stream / Merge Animator Driver** | Process streams/drivers in the armature merge path. Both on. Drivers are split above 16 entries. |
+| **Merge Advanced Pointer Trigger** | Placeholder: enabling it does not implement pointer-trigger merging. |
+| **Merge Dynamic Bones / Merge Magica Cloth** | Enable component handling in the armature merge path. Both on. |
+
+Write Defaults detection reads the default state of the base controller's first layer and applies its value to incoming states when available. Check mixed Write Defaults manually. Animator parameters are added by name; resolve incompatible same-name parameters before merging.
+
+AAS entries with an already-present machine name are skipped. Use **Advanced Settings Prefix** when necessary and inspect the combined menu; the prefix also applies to copied display names.
+
+**AAS prerequisites and generated assets:** configure a valid `AnimatorController` in the base avatar's AAS **baseController** field. If used, **baseOverrideController** must be an `AnimatorOverrideController`. Each AAS entry must have a setting implementation, and combined synced usage must fit the installed CCK's limit.
+
+The plugin calls CCK Create + Attach on the build clone once per target avatar. It uses a unique build name to avoid overwriting source output, preserves source controller inputs, and verifies that saved animator/override assets were produced and attached. Build-only controller inputs are materialized under `Assets/NDMF Merge Generated` when necessary; CCK also writes its generated controller assets. Keep generated assets referenced by a baked avatar if you retain that bake.
+
+### Mesh utilities, validation, and exclusions
+
+| Group | Options and behavior |
+| --- | --- |
+| **UV Validation** | **Fill Missing UVs** is on and fills absent/invalid UV0 arrays with zeros. **Auto Fix Overlapping** and **Auto Fix Inverted** are off. Overlap detection uses a small degenerate-triangle heuristic and generates secondary UVs; inversion detection can flip UV0 vertically. These are basic repairs, not full texture unwrapping. |
+| **Material Consolidation** | Enabled by default. Reuses material references within an outfit's skinned renderers using the same shader plus name similarity (threshold **0.9**) or a shared non-null `_MainTex`. It does not compare every shader property, combine meshes, or guarantee fewer draw calls. Review materials differing in color, keywords, or other textures. |
+| **Bone Chain Validation** | Off; optionally warn about incomplete common spine/arm/leg chains. |
+| **Pre-Merge Validation** | Missing-bone and mesh-integrity checks are on. |
+| **Post-Merge Verification** | Bounds and probe checks are on. |
+| **Exclusions** | Specify transforms or wildcard name patterns (`*`, `?`) to skip during armature processing. Exclusion does not guarantee a source object is copied into the final avatar; inspect the bake. |
+
+## Blend shape tasks
+
+Open **BlendShape Transfer** and click **+ Add Blend Shape Task**. Each task has independent **Enabled**, **Direction**, **Weight Transfer**, and **Frame Generation** settings. Use **Up**, **Down**, **Duplicate**, and **Delete** to manage the list. Legacy weight/generation settings migrate into tasks when the task list is empty.
+
+Tasks run from the Armature Mode merge path, per processed outfit. Object-only setups do not run this pipeline. Review targets when using multiple outfits rather than assuming a task runs only once for the whole avatar.
+
+### Copy current weights
+
+Choose **Outfit → Base**, **Base → Outfit**, **Both Directions**, or **Mesh → Mesh**, then enable **Enable Weight Transfer**. For Mesh → Mesh, assign its **Source Mesh** and **Target Mesh**. **Match by Name** is on; disabling it uses index-based matching. **Min Weight Threshold** defaults to 0, and **Use Smart Weight Transfer** is on.
+
+This copies current weight values. To create missing deformation frames, enable generation too.
+
+### Generate frames and extend animations
+
+1. Enable **Enable Generation** and assign its **Source Mesh**.
+2. Select **Generation Targets**, or enable **Apply To All** for the base and all outfits. For **Mesh → Mesh**, assign the generation **Target Mesh** directly. Weight-transfer and generation mesh fields are separate.
+3. Enter comma-separated **Blend Shapes** names, or leave empty to process all source shapes.
+4. Choose **Transfer Method**: **Approximate (Nearest Vertex)**, **K-Nearest Blended**, or **Bounds Normalized Nearest**.
+5. Start with **Max Mapping Distance = 0.01** and inspect results. Adjust for mesh scale/alignment. These methods approximate deformation across different topologies.
+6. Leave **Override Existing** off to skip shapes already present on the destination. Enable it to replace existing shapes. **Use Smart Frame Generation** is on.
+7. Enable **Add to Existing Animations** if existing base-avatar clips animate the source shape and should also animate the generated target shape. Affected clips are copied and rebound inside the clone.
+
+For example, to generate a body fit shape on a hoodie, use the body as the generation source, select the hoodie target, enter the shape's name, and bake to inspect deformation. Weight copying alone cannot create that shape on the hoodie.
+
+## Preview, presets, and logging
+
+- **Hierarchy Comparison** displays proposed matches, match reasons, final names, and unique bones. It needs a CVRAvatar and detectable armature. Investigate matches here, then verify with Manual Bake.
+- **Preview & Stats** summarizes meshes, materials, geometry, conflicts, components, and controllers. Refresh after changing sources/settings. Statistics are estimates, not build validation.
+- **Save Current as Preset** stores a preset in the component's saved preset list. It captures the first outfit's bounds/probe modes, scale/cleanup flags, unique/mesh prefixes, plus global bone mappings. **Load** applies those outfit settings to all entries and replaces global mappings. This is a subset of configuration, not a full setup backup or standalone preset asset.
+- **Logging** defaults to **Errors Only**. Use **Errors + Warnings** while configuring and **All Details** for investigation. **Verbose Logging** defaults to **Simple**; select **Detailed** with All Details for deeper diagnostics. Some build status/error messages are emitted independently of these filters.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| Component/plugin does not load | Check Unity compile errors and installation of CCK, NDMF, and Chillaxins. Verify the package folder contains `package.json`, or use the correct Git URL above. |
+| Nothing merges / no base avatar found | Put the merger on the CVRAvatar GameObject. Armature entries need a detectable base armature and outfit skinned bones. |
+| Accessory disappears | Put renderers beneath an empty container. Choose Object Mode for rigid objects and assign its placement target. Inspect child active states on the bake. |
+| Target-bone weighting fails | Select a base-avatar bone outside the outfit. Separate bone transforms and mesh objects below the source container. Check validation errors for unsupported layouts. |
+| Clothes stretch | Review Detect Mismatches and mappings. Keep bindpose compensation on. Try **As child, keep position and rotation** for problematic bones and compare normalization modes. |
+| Cloth explodes | Check component handling, normalization, and matching. Magica rebuild code requires the CCK Magica support define and compatible components. Test physics on a fresh bake. |
+| Animations fail | Enable master and per-outfit animator options; check source controllers, Rewrite Animation Paths, parameter collisions, and Write Defaults. Test renamed mesh paths. |
+| AAS generation fails | Read the CCK error. Check the AAS base controller, optional override type, valid entries, and combined synced bits. An incompatible CCK reflection API also produces an explicit error. |
+| AAS toggles fail | Keep Merge Advanced Avatar Setup and Generate AAS Controller At End enabled. Inspect the bake's attached override controller and menu entries. |
+| Blend shapes are absent | Enable the task and generation; assign generation source/target, check shape names/distance, and confirm an Armature Mode entry processes the task. Enable animation copying if needed. |
+| Mesh vanishes at some angles | Try bounds copying from a suitable body renderer or recalculate from mesh. Verify bounds during animation. |
+| UVs or materials look different | Review UV heuristics and material matching. Similar names or a shared texture do not imply all material properties match. Disable the relevant tool and compare a fresh bake. |
+| References point to old bones/objects | Inspect remapping logs. Merged bones use the source-to-target map; other references may need unique names/paths to resolve. |
+| Per-outfit settings changed unexpectedly | Global defaults and preset loading overwrite entry settings. Apply global values first, then customize outfits. |
+
+## Build and release workflow
+
+### NDMF processing
+
+1. **Resolving — Merge Armatures:** clone outfit sources, normalize transforms, run the selected merge path, process AAS/driver data, remove temporary containers, remap references, and rebuild supported Magica data. Armature entries also run mesh utilities and blend shape tasks.
+2. **Transforming — Merge Animators:** import enabled outfit layers/parameters and apply animation options.
+3. **Transforming — Generate AAS Controller At End:** run CCK Create + Attach when enabled, remove merge components from the result, and save/refresh generated assets.
+
+These are the plugin's registered passes. Use Manual Bake after configuration changes to inspect the combined result with other installed NDMF plugins.
+
+### Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| [`packages/NDMF-Merge/Runtime/CVRMergeArmature.cs`](packages/NDMF-Merge/Runtime/CVRMergeArmature.cs) | Serialized settings, enums, migrations, and preset data. |
+| [`packages/NDMF-Merge/Editor/CVRMergeArmatureEditor.cs`](packages/NDMF-Merge/Editor/CVRMergeArmatureEditor.cs) | Inspector, defaults, tasks, conflict tools, and previews. |
+| [`packages/NDMF-Merge/Editor/CVRMergeArmaturePlugin.cs`](packages/NDMF-Merge/Editor/CVRMergeArmaturePlugin.cs) | NDMF passes, merging, controller generation, and remapping. |
+| [`packages/NDMF-Merge/package.json`](packages/NDMF-Merge/package.json) | Package metadata and dependencies. |
+| [`.github/workflows/upm-release.yml`](.github/workflows/upm-release.yml) | Publish the package branch when a GitHub release is published. |
+
+The source links above describe the development repository. The generated UPM branch contains the package at its root instead.
+
+### Publishing a package release
+
+The **Update-UPM-Branch** workflow runs on GitHub **release → published**; pushing a tag alone does not trigger it.
+
+1. Prepare changes on the intended release target branch and publish a GitHub release with a version tag such as `v1.2.1`.
+2. The workflow checks out `release.target_commitish` with full history, strips a leading `v` from the tag, and updates the version in `packages/NDMF-Merge/package.json`.
+3. If needed, the bot commits/pushes the manifest update back to the target branch. The workflow needs `contents: write` and permission to push there.
+4. `hecomi/create-upm-branch-action` publishes from `packages/NDMF-Merge`, includes root `README.md` and `LICENSE.txt`, and receives the original release tag. Inspect the resulting `upm` branch/package and Actions run before directing users to update.
+
+The repository currently has this release workflow rather than an automated Unity test workflow. Validate behavior in a Unity project with the CVR dependencies, including Manual Bake, AAS Create + Attach, target-bone weighting, and affected animation/physics behavior.
+
 MIT License. See [LICENSE.txt](LICENSE.txt).
